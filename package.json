@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "kusuma": "node telegram3.js"
+    "hermes": "node telegram3.js",
+    "gateway": "concurrently -n ngrok,bot -c yellow,cyan \"ngrok http 3000\" \"npm run hermes\""
   },
   "dependencies": {
     "@google/genai": "^2.15.0",
@@ -13,5 +14,8 @@
     "playwright": "^1.62.0",
     "undici": "^8.10.0",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
   }
 }

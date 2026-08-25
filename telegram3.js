@@ -1,11 +1,24 @@
 // ======================================
-// TELEGRAM HERMES - FINAL BUILD (v20 - validasi kelengkapan nama &
-// kode promo di executorAgent.js, edit field cuma Nama Promotion +
-// Kode Promo, isFlagResolved sebagai satu sumber kebenaran)
-// (Manual: Template deterministik / Tanya Jawab deterministik)
-// + Import Excel (via AI, 1x panggilan per BATCH - baik untuk baris
-//   aman maupun baris kosong yang sudah dikonfirmasi user, BUKAN
-//   1x per baris - supaya hemat token walau baris banyak)
+// TELEGRAM HERMES - FINAL BUILD (v25 - MODE WEBHOOK LOKAL, bukan polling
+// lagi. Perubahan dari v24: bot tidak lagi aktif "nanya" ke Telegram
+// terus-menerus (polling: true dihapus). Sekarang Telegram yang KIRIM
+// update ke server lokal kita lewat HTTP POST, diteruskan lewat tunnel
+// publik (ngrok / Cloudflare Tunnel) karena kita tidak punya VPS/domain
+// sendiri. State (userState, manualSessions, dll) TETAP di memory proses
+// yang sama seperti sebelumnya - TIDAK dipindah ke database, karena
+// prosesnya tetap 1 dan terus jalan (bukan serverless).
+//
+// CARA PAKAI:
+//   1. Jalankan ngrok: ngrok http 3000
+//   2. Copy URL https yang keluar dari ngrok, isi ke PUBLIC_URL di .env
+//   3. Jalankan bot ini: npm run hermes (webhook otomatis didaftarkan
+//      ke Telegram saat startup kalau PUBLIC_URL sudah diisi)
+//   4. Cek pendaftaran webhook:
+//      curl https://api.telegram.org/bot<TOKEN>/getWebhookInfo
+//
+// CATATAN: URL ngrok gratis BERUBAH tiap kali ngrok di-restart - berarti
+// PUBLIC_URL di .env juga harus diupdate + bot di-restart tiap kali itu
+// terjadi, supaya webhook yang terdaftar ke Telegram tetap valid.
 // ======================================
 
 require("./networkConfig");
@@ -13,6 +26,7 @@ const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
 
+const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 
 const { ensureLoggedIn } = require("./indexxx");
@@ -51,14 +65,28 @@ const {
 const { formatTokenSummary } = require("./tools/tokenMonitor");
 const { isUncertainReply, getHelpText } = require("./tools/uncertainty");
 const { askContextualHelp } = require("./tools/contextHelper");
+const { answerPromotionQuestion } = require("./tools/analysisAgent");
 
-const VERSION_TAG = "telegram3-final-v20-validasi-nama-kode-promo";
+const VERSION_TAG = "telegram3-final-v25-webhook-ngrok";
 
 if (!process.env.TELEGRAM_TOKEN) {
   throw new Error("TELEGRAM_TOKEN belum ada di .env");
 }
 if (!process.env.GEMINI_API_KEY) {
   throw new Error("GEMINI_API_KEY belum ada di .env");
+}
+if (!process.env.WEBHOOK_SECRET) {
+  throw new Error(
+    "WEBHOOK_SECRET belum ada di .env - ini dipakai sebagai bagian rahasia di path webhook " +
+      "(https://.../webhook/<WEBHOOK_SECRET>) supaya endpoint tidak sembarangan bisa di-POST orang lain. " +
+      "Isi dengan string acak yang panjang, bebas format."
+  );
+}
+if (!process.env.PUBLIC_URL) {
+  console.warn(
+    "⚠️ PUBLIC_URL belum diisi di .env - webhook TIDAK akan otomatis didaftarkan ke Telegram saat start. " +
+      "Jalankan ngrok/Cloudflare Tunnel dulu, copy URL https-nya ke PUBLIC_URL, baru restart bot."
+  );
 }
 
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || null;
@@ -81,7 +109,11 @@ if (!process.env.GUESTPRO_PROMOTION_URL_TEMPLATE) {
   );
 }
 
-const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
+// PERUBAHAN UTAMA v25: TIDAK ADA LAGI { polling: true }. Bot dibuat
+// dalam mode pasif - dia cuma dipakai untuk KIRIM balasan (sendMessage,
+// editMessageText, dll), sedangkan update MASUK diproses manual lewat
+// bot.processUpdate() di dalam handler webhook Express di bawah.
+const bot = new TelegramBot(process.env.TELEGRAM_TOKEN);
 
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 if (!fs.existsSync(UPLOAD_DIR)) {
@@ -158,6 +190,42 @@ const LIMIT_TITLE_BY_TYPE = {
   quota: "💳 KUOTA AI HABIS",
   timeout: "⌛ KONEKSI KE AI TIMEOUT",
 };
+
+// Telegram membatasi ±4096 karakter per pesan. Kalau teks (misal
+// daftar 46+ nama promosi) lebih panjang dari itu, pecah jadi
+// beberapa pesan berurutan - dipecah per BARIS supaya tidak ada
+// baris yang terpotong di tengah, dan tidak ada data yang hilang.
+const TELEGRAM_SAFE_CHUNK_SIZE = 3500;
+
+function splitLongMessage(text, maxLen = TELEGRAM_SAFE_CHUNK_SIZE) {
+  if (!text || text.length <= maxLen) return [text];
+
+  const lines = text.split("\n");
+  const chunks = [];
+  let current = "";
+
+  for (const line of lines) {
+    const candidate = current ? current + "\n" + line : line;
+    if (candidate.length > maxLen && current) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+
+  return chunks;
+}
+
+async function sendLong(chatId, text) {
+  const chunks = splitLongMessage(text);
+  for (let i = 0; i < chunks.length; i++) {
+    const prefix = chunks.length > 1 ? `*(${i + 1}/${chunks.length})*\n\n` : "";
+    await send(chatId, prefix + chunks[i]);
+  }
+}
+
 
 async function send(chatId, text, retryCount = 0) {
   const safeText =
@@ -527,10 +595,44 @@ bot.on("message", async (msg) => {
     return;
   }
 
-  if (text === "promotion") {
+  // ==================== COMMAND: /promotion ====================
+  if (text === "promotion" || text === "/promotion") {
     await startPromotionFlow(chatId);
     return;
   }
+  // ==================== AKHIR COMMAND /promotion ====================
+
+  // ==================== COMMAND: /analisis (AI, PERTANYAAN BEBAS) ====================
+  const isAnalisisCommand =
+    text === "analisis" ||
+    text.startsWith("/analisis") ||
+    text.startsWith("analisis ");
+
+  if (isAnalisisCommand) {
+    const question = raw.replace(/^\/?analisis\s*/i, "").trim();
+
+    try {
+      await send(chatId, "🔐 Mengecek status login GuestPro...");
+      await ensureLoggedIn();
+    } catch (err) {
+      await send(chatId, `❌ Gagal login: ${escapeMarkdown(err.message)}`);
+      return;
+    }
+
+    await send(chatId, "Baik, mohon ditunggu...");
+
+    const processId = `${chatId}-${Date.now()}`;
+
+    try {
+      const answer = await answerPromotionQuestion({ chatId, processId, question });
+      await sendLong(chatId, answer);
+    } catch (err) {
+      console.error("❌ Error saat analisis AI:", err);
+      await send(chatId, `❌ Gagal analisis: ${escapeMarkdown(err.message)}`);
+    }
+    return;
+  }
+  // ==================== AKHIR COMMAND /analisis ====================
 
   const mode = userState.get(chatId);
 
@@ -655,7 +757,7 @@ bot.on("message", async (msg) => {
 
   await send(
     chatId,
-    "❌ Perintah tidak dikenal.\n\nKetik */start* untuk lihat menu, atau ketik *PROMOTION* untuk mulai langsung.\nKetik *TOKEN* untuk lihat pemakaian token LLM.\nKetik *VERSION* untuk cek versi bot yang aktif."
+    "❌ Perintah tidak dikenal.\n\nKetik */start* untuk lihat menu, atau ketik */promotion* untuk mulai langsung.\nKetik */analisis <pertanyaan>* untuk tanya statistik promosi (contoh: */analisis berapa promo yang masih aktif?*).\nKetik *TOKEN* untuk lihat pemakaian token LLM.\nKetik *VERSION* untuk cek versi bot yang aktif."
   );
 });
 
@@ -851,19 +953,40 @@ bot.on("callback_query", async (query) => {
   // mode lain (WAIT_EXCEL, atau tidak ada state) -> tombol basi, abaikan
 });
 
-console.log(`🤖 Hermes Running [${VERSION_TAG}] - PID ${process.pid}`);
+// ==========================================================
+// WEBHOOK SERVER (v25) - menggantikan peran polling. Telegram akan
+// POST update ke sini lewat tunnel publik (ngrok/Cloudflare Tunnel),
+// bukan bot yang aktif nanya ke Telegram tiap beberapa detik lagi.
+// ==========================================================
+const app = express();
+app.use(express.json());
 
-if (ADMIN_CHAT_ID) {
-  sendButtons(
-    ADMIN_CHAT_ID,
-    "👋 SELAMAT DATANG DI AGNET AI BOOKING ENGINE!!!\n\nYuk, mulai sekarang 👇",
-    [[{ text: "🎯 PROMOTION", callback_data: "cmd:promotion" }]]
-  ).catch((err) => {
-    console.error(
-      "❌ Gagal kirim pesan auto-welcome ke ADMIN_CHAT_ID:",
-      err.message,
-      "\n   Kemungkinan penyebab: chatId ini belum pernah chat dengan bot sebelumnya (Telegram menolak",
-      "\n   bot mengirim pesan duluan ke chatId yang belum 'kenal' bot), atau ADMIN_CHAT_ID salah/typo."
+const WEBHOOK_PATH = `/webhook/${process.env.WEBHOOK_SECRET}`;
+const PORT = process.env.PORT || 3000;
+
+app.post(WEBHOOK_PATH, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+// Endpoint simpel buat ngecek server hidup (opsional, berguna pas testing)
+app.get("/", (req, res) => res.send("Hermes webhook aktif ✅"));
+
+app.listen(PORT, async () => {
+  console.log(`🤖 Hermes Running [${VERSION_TAG}] - PID ${process.pid}`);
+  console.log(`🌐 Webhook server listening di port ${PORT}`);
+
+  if (process.env.PUBLIC_URL) {
+    const webhookUrl = `${process.env.PUBLIC_URL}${WEBHOOK_PATH}`;
+    try {
+      await bot.setWebHook(webhookUrl);
+      console.log(`✅ Webhook terdaftar ke Telegram: ${webhookUrl}`);
+    } catch (err) {
+      console.error("❌ Gagal daftar webhook ke Telegram:", err.message);
+    }
+  } else {
+    console.warn(
+      "⚠️ PUBLIC_URL kosong - webhook belum didaftarkan. Isi PUBLIC_URL di .env dengan URL ngrok/tunnel, lalu restart."
     );
-  });
-}
+  }
+});
