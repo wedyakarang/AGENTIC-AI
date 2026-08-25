@@ -2,6 +2,10 @@
 
 Bot otomatis untuk promosi GuestPro, terintegrasi dengan Telegram dan AI (OpenAI/Gemini).
 
+# Skill yang dimiliki
+1. Membuat Promosii
+2. Analisis Data Promosi
+
 ## Cara Install
 
 1. **Extract** file zip ini ke folder mana saja di laptop kamu.
