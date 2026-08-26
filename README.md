@@ -26,8 +26,7 @@ Di VSCode, buka file **`.env`** (sudah otomatis dibuat dari template), lalu isi 
 | `OPENAI_API_KEY` | Daftar/login di https://platform.openai.com → API keys → Create new secret key |
 | `GEMINI_API_KEY` | Daftar/login di https://aistudio.google.com → Get API key |
 | `ADMIN_CHAT_ID` | Chat @userinfobot di Telegram, dia akan balas dengan Chat ID kamu (opsional, untuk notifikasi admin) |
-| `GUESTPRO_USERNAME` | Username akun GuestPro kamu |
-| `GUESTPRO_PASSWORD` | Password akun GuestPro kamu |
+
 
 Contoh isi `.env` setelah diisi:
 ```env
