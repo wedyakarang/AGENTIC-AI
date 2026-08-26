@@ -332,4 +332,4 @@ module.exports = {
   getSessionRemainingDays,
   getSessionExpiryDate,
   cleanupChromeSessionDir,
-};
+};    
