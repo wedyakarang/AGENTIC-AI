@@ -7,18 +7,18 @@
 // SESSION PERSISTENCE: HANYA TOKEN yang disimpan permanen (ke
 // AUTH_STATE_FILE), BUKAN folder session Chrome.
 //
-// VALIDASI SESSION (BARU): isSessionValid() TIDAK LAGI menebak umur
-// token sendiri (dulu hardcode 90 hari). Sekarang dia benar-benar
-// tanya ke server GuestPro lewat CURRENT_USER_ENDPOINT (endpoint
-// ringan, cuma balikin data user, dipakai juga oleh dashboard GuestPro
-// sendiri buat cek "siapa saya"). Kalau server bilang 401/403 -> token
-// memang invalid, baru dianggap expired. Kalau network/server lagi
-// error (500, timeout) -> TIDAK langsung dianggap expired, supaya bot
-// tidak maksa login manual gara-gara GuestPro lagi gangguan sesaat.
+// VALIDASI SESSION: isSessionValid() TIDAK menebak umur token sendiri.
+// Dia tanya ke server GuestPro lewat CURRENT_USER_ENDPOINT. Kalau
+// server bilang 401/403 -> token invalid, dianggap expired. Kalau
+// network/server error (500, timeout) -> TIDAK langsung dianggap
+// expired, supaya bot tidak maksa login manual gara-gara GuestPro
+// lagi gangguan sesaat.
 //
-// SESSION_MAX_AGE_MS masih disimpan HANYA buat info "sisa X hari" yang
-// ditampilkan ke user di Telegram (getSessionRemainingDays) - bukan
-// lagi penentu valid/tidaknya token.
+// UMUR TOKEN (BARU): getSessionRemainingDays() TIDAK LAGI pakai
+// SESSION_MAX_AGE_MS hardcode. Sekarang dibaca LANGSUNG dari klaim
+// "exp" di dalam JWT itu sendiri - klaim ini ditandatangani oleh
+// server GuestPro saat token diterbitkan, jadi umurnya memang
+// ditentukan oleh server/API, bukan ditebak di kode kita.
 // ======================================
 
 const fs = require("fs");
@@ -30,9 +30,6 @@ const AUTH_STATE_FILE = path.join(path.dirname(SESSION_DIR), "auth-state.json");
 
 // Endpoint ringan GuestPro buat cek token masih valid di server (bukan tebak umur sendiri)
 const CURRENT_USER_ENDPOINT = "https://demo-ga-api.guestpro.co.id/admin-merchant/api/curent-user-get";
-
-// Cuma dipakai buat estimasi tampilan "sisa X hari" ke user, BUKAN penentu valid/invalid
-const SESSION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
 let authState = {
   token: null,
@@ -99,13 +96,8 @@ function deleteAuthStateFile() {
 // ==========================================================
 // CEK VALIDITAS SESSION (dipanggil oleh ensureLoggedIn di indexxx.js)
 // ==========================================================
-// ASYNC sekarang - benar-benar tanya ke server via CURRENT_USER_ENDPOINT,
-// bukan hitung umur token sendiri. Kalau token ada (di memory atau file)
-// tapi belum tervalidasi ke server, tetap dicoba dulu ke server -
-// server yang punya kebenaran soal umur token, bukan kita.
 
 async function isSessionValid() {
-  // Restore dari file dulu kalau memory kosong (proses baru di-restart)
   if (!authState.token) {
     const saved = loadAuthStateFromDisk();
     if (saved && saved.token) {
@@ -131,13 +123,11 @@ async function isSessionValid() {
     }
 
     if (!res.ok) {
-      // Error lain (500, dll) - jangan buru-buru anggap expired, bisa jadi GuestPro lagi gangguan
       console.log("⚠️ Validasi token gagal (status", res.status, "), diasumsikan masih valid sementara");
       return true;
     }
 
     const body = await res.json();
-    // Dukung dua kemungkinan bentuk response: object langsung {...} atau array [{...}]
     const userData = Array.isArray(body) ? body[0] : (body?.data ?? body);
 
     if (!userData || userData.success === false || !userData.username) {
@@ -148,21 +138,61 @@ async function isSessionValid() {
     console.log("✅ Token dikonfirmasi valid oleh server (username:", userData.username, ")");
     return true;
   } catch (e) {
-    // Gagal konek (bukan token yang salah) - jangan maksa login ulang
     console.log("⚠️ Gagal menghubungi server untuk validasi token:", e.message, "- diasumsikan masih valid sementara");
     return true;
   }
 }
 
-// Sisa umur session dalam hari - ESTIMASI SAJA buat ditampilkan ke user
-// lewat Telegram, bukan lagi acuan valid/tidak (itu tugas isSessionValid()).
+// ==========================================================
+// UMUR TOKEN - dibaca dari klaim exp di dalam JWT (ditentukan
+// server GuestPro saat token diterbitkan), BUKAN dihitung dari
+// angka hardcode.
+// ==========================================================
+
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+
+    let payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (payload.length % 4) payload += "=";
+
+    const json = Buffer.from(payload, "base64").toString("utf-8");
+    return JSON.parse(json);
+  } catch (e) {
+    console.log("⚠️ Gagal decode payload token:", e.message);
+    return null;
+  }
+}
+
+// Sisa umur session dalam hari - dibaca dari klaim "exp" di token
+// (detik Unix, ditandatangani server). return null kalau tidak
+// terbaca, supaya TIDAK disalahartikan sebagai "0 hari / expired".
 function getSessionRemainingDays() {
   const saved = authState.token ? authState : loadAuthStateFromDisk();
-  if (!saved || !saved.obtainedAt) return 0;
+  if (!saved || !saved.token) return null;
 
-  const age = Date.now() - saved.obtainedAt;
-  const remainingMs = SESSION_MAX_AGE_MS - age;
+  const payload = decodeJwtPayload(saved.token);
+  if (!payload || typeof payload.exp !== "number") {
+    console.log("⚠️ Token tidak punya klaim 'exp' yang bisa dibaca - sisa hari tidak diketahui");
+    return null;
+  }
+
+  const expiresAtMs = payload.exp * 1000;
+  const remainingMs = expiresAtMs - Date.now();
+
   return Math.max(0, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+}
+
+// Tanggal persis token expired, dibaca dari klaim exp di server.
+function getSessionExpiryDate() {
+  const saved = authState.token ? authState : loadAuthStateFromDisk();
+  if (!saved || !saved.token) return null;
+
+  const payload = decodeJwtPayload(saved.token);
+  if (!payload || typeof payload.exp !== "number") return null;
+
+  return new Date(payload.exp * 1000);
 }
 
 function cleanupChromeSessionDir() {
@@ -260,7 +290,7 @@ async function loginManual({ timeoutMs = 0 } = {}) {
     if (!capturedUserGroupId) {
       console.log(
         "⚠️ PERINGATAN: user-group-id TIDAK tertangkap. " +
-        "Create promotion mungkin gagal. Coba klik-klik dashboard dulu sebelum browsertertutup, lalu login ulang."
+        "Create promotion mungkin gagal. Coba klik-klik dashboard dulu sebelum browser ditutup, lalu login ulang."
       );
     }
 
@@ -300,5 +330,6 @@ module.exports = {
   clearSession,
   isSessionValid,
   getSessionRemainingDays,
+  getSessionExpiryDate,
   cleanupChromeSessionDir,
 };

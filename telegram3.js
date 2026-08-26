@@ -8,6 +8,14 @@
 // yang sama seperti sebelumnya - TIDAK dipindah ke database, karena
 // prosesnya tetap 1 dan terus jalan (bukan serverless).
 //
+// v26 - PERUBAHAN: tombol "🎯 PROMOTION" yang otomatis muncul lagi
+// setiap kali sebuah proses (create manual/import/force-create/cancel)
+// SELESAI (lewat fungsi sendPromotionAgainButton) SUDAH DIHAPUS.
+// Sekarang tombol itu HANYA muncul di 1 tempat: balasan command /start.
+// Kalau user mau bikin promotion baru setelah selesai, dia tinggal
+// ketik ulang "promotion" atau "/promotion" secara manual - tidak ada
+// lagi tombol pintasan yang otomatis dimunculkan bot.
+//
 // CARA PAKAI:
 //   1. Jalankan ngrok: ngrok http 3000
 //   2. Copy URL https yang keluar dari ngrok, isi ke PUBLIC_URL di .env
@@ -67,7 +75,7 @@ const { isUncertainReply, getHelpText } = require("./tools/uncertainty");
 const { askContextualHelp } = require("./tools/contextHelper");
 const { answerPromotionQuestion } = require("./tools/analysisAgent");
 
-const VERSION_TAG = "telegram3-final-v25-webhook-ngrok";
+const VERSION_TAG = "telegram3-final-v26-webhook-ngrok";
 
 if (!process.env.TELEGRAM_TOKEN) {
   throw new Error("TELEGRAM_TOKEN belum ada di .env");
@@ -369,11 +377,13 @@ async function downloadFile(fileId, savePath) {
   await fs.promises.writeFile(savePath, buffer);
 }
 
-async function sendPromotionAgainButton(chatId) {
-  await sendButtons(chatId, "SELAMAT DATANG DI AGENT AI BOOKING ENGINE!!!", [
-    [{ text: "🎯 PROMOTION", callback_data: "cmd:promotion" }],
-  ]);
-}
+// v26: fungsi sendPromotionAgainButton() DIHAPUS. Sebelumnya fungsi
+// ini dipanggil otomatis setiap kali sebuah proses (create manual,
+// import excel, force-create setelah flag, atau cancel) SELESAI -
+// efeknya tombol "🎯 PROMOTION" terus muncul berulang-ulang tiap
+// user selesai bikin promotion, padahal user cuma minta tombol itu
+// muncul saat /start saja. Semua titik pemanggilannya di bawah sudah
+// dihapus juga (lihat komentar "v26" di tiap lokasi).
 
 async function runFinalizeAndReport(chatId, finalData, onDoneCleanup) {
   clearProgress(chatId);
@@ -406,7 +416,7 @@ async function runFinalizeAndReport(chatId, finalData, onDoneCleanup) {
 
     await updateProgress(chatId, combinedText, null);
     clearProgress(chatId);
-    await sendPromotionAgainButton(chatId);
+    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
   } catch (err) {
     console.error("❌ Error saat finalizeAndCreate:", err);
 
@@ -422,7 +432,7 @@ async function runFinalizeAndReport(chatId, finalData, onDoneCleanup) {
 
     await updateProgress(chatId, `❌ ERROR saat membuat promotion: ${escapeMarkdown(err.message)}`, null);
     clearProgress(chatId);
-    await sendPromotionAgainButton(chatId);
+    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
   }
 
   if (onDoneCleanup) onDoneCleanup();
@@ -446,7 +456,7 @@ async function runImportAndReport(chatId, filePath) {
     if (result.status === "error") {
       await updateProgress(chatId, "❌ " + escapeMarkdown(result.message), null);
       clearProgress(chatId);
-      await sendPromotionAgainButton(chatId);
+      // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
     } else if (result.status === "flagged" || result.flagged) {
       return;
     } else {
@@ -460,7 +470,7 @@ async function runImportAndReport(chatId, filePath) {
 
       await updateProgress(chatId, combinedText, null);
       clearProgress(chatId);
-      await sendPromotionAgainButton(chatId);
+      // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
     }
   } catch (err) {
     console.error("❌ Error saat finalizeImportExcel:", err);
@@ -477,7 +487,7 @@ async function runImportAndReport(chatId, filePath) {
 
     await updateProgress(chatId, `❌ ERROR:\n\n${escapeMarkdown(err.message)}`, null);
     clearProgress(chatId);
-    await sendPromotionAgainButton(chatId);
+    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
   } finally {
     fs.unlink(filePath, () => {});
     userState.delete(chatId);
@@ -488,14 +498,14 @@ async function reportForceOutcome(chatId, outcome) {
   if (!outcome) {
     await updateProgress(chatId, "❌ Terjadi kesalahan tak terduga saat memproses konfirmasi.", null);
     clearProgress(chatId);
-    await sendPromotionAgainButton(chatId);
+    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
     return;
   }
 
   if (outcome.error) {
     await updateProgress(chatId, `❌ ${escapeMarkdown(outcome.error)}`, null);
     clearProgress(chatId);
-    await sendPromotionAgainButton(chatId);
+    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
     return;
   }
 
@@ -520,8 +530,7 @@ async function reportForceOutcome(chatId, outcome) {
 
   await updateProgress(chatId, combinedText, null);
   clearProgress(chatId);
-
-  await sendPromotionAgainButton(chatId);
+  // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
 }
 
 async function startPromotionFlow(chatId) {
@@ -800,7 +809,7 @@ bot.on("callback_query", async (query) => {
     cancelAfterFlag(chatId);
     await editButtons(chatId, messageId, "❌ Dibatalkan.", null);
     clearProgress(chatId);
-    await sendPromotionAgainButton(chatId);
+    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
     userState.delete(chatId);
     flagEditSessions.delete(chatId);
     resetManualSession(manualSessions, chatId);
