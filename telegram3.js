@@ -1,20 +1,46 @@
 // ======================================
-// TELEGRAM HERMES - FINAL BUILD (v25 - MODE WEBHOOK LOKAL, bukan polling
-// lagi. Perubahan dari v24: bot tidak lagi aktif "nanya" ke Telegram
-// terus-menerus (polling: true dihapus). Sekarang Telegram yang KIRIM
-// update ke server lokal kita lewat HTTP POST, diteruskan lewat tunnel
-// publik (ngrok / Cloudflare Tunnel) karena kita tidak punya VPS/domain
-// sendiri. State (userState, manualSessions, dll) TETAP di memory proses
-// yang sama seperti sebelumnya - TIDAK dipindah ke database, karena
-// prosesnya tetap 1 dan terus jalan (bukan serverless).
-//
-// v26 - PERUBAHAN: tombol "🎯 PROMOTION" yang otomatis muncul lagi
-// setiap kali sebuah proses (create manual/import/force-create/cancel)
-// SELESAI (lewat fungsi sendPromotionAgainButton) SUDAH DIHAPUS.
-// Sekarang tombol itu HANYA muncul di 1 tempat: balasan command /start.
-// Kalau user mau bikin promotion baru setelah selesai, dia tinggal
-// ketik ulang "promotion" atau "/promotion" secara manual - tidak ada
-// lagi tombol pintasan yang otomatis dimunculkan bot.
+// TELEGRAM HERMES - FINAL BUILD (v27 - PERBAIKAN UX)
+// ======================================
+// Riwayat:
+// v25 - Mode WEBHOOK LOKAL (bukan polling). Telegram KIRIM update ke
+//        server lokal lewat HTTP POST, diteruskan lewat tunnel publik
+//        (ngrok / Cloudflare Tunnel). State tetap di memory proses yang
+//        sama (Map), tidak dipindah ke database.
+// v26 - Tombol "🎯 PROMOTION" yang otomatis muncul lagi setiap proses
+//        selesai DIHAPUS. Tombol itu hanya muncul di balasan /start.
+// v27 - PERBAIKAN UX (perubahan di build ini):
+//   1. Global escape hatch: ketik "batal"/"cancel"/"stop" kapan saja
+//      saat sedang di tengah flow untuk langsung keluar bersih.
+//   2. Konfirmasi akhir SEBELUM submit: data yang lolos rule-based
+//      check (yang sebelumnya langsung dieksekusi tanpa preview) kini
+//      selalu ditampilkan dulu ke user via tombol "Buat / Ubah / Batal"
+//      sebelum benar-benar dibuat ke GuestPro.
+//   3. Pesan error ke user dibuat ramah (friendlyError) - detail
+//      teknis tetap lengkap di console.error + (opsional) dikirim ke
+//      ADMIN_CHAT_ID, tapi user cuma lihat pesan yang mudah dipahami.
+//   4. Indikator "sedang mengetik" (sendChatAction) dikirim sebelum
+//      pemanggilan AI yang agak lama (finalize & analisis) supaya bot
+//      terasa responsif, bukan diam total.
+//   5. /start sekarang menyebutkan semua command yang tersedia
+//      (promotion, analisis, token, batal) - sebelumnya tersembunyi.
+//   6. Tombol "➕ Buat promotion lagi" ditempel di PESAN HASIL yang
+//      sama setelah promotion berhasil dibuat (bukan pesan/tombol baru
+//      terpisah seperti di v25) - kompromi antara v25 (berisik) dan
+//      v26 (user harus ingat ketik ulang "promotion" manual).
+// v28 - PERBAIKAN ROBUSTNESS (perubahan di build ini):
+//   7. Busy-lock per chat: mencegah double-tap tombol "Buat Promotion"
+//      atau pesan beruntun memicu proses ganda (promotion dobel).
+//   8. Timeout pembungkus untuk semua panggilan eksternal (login,
+//      finalize, import excel, analisis) - chat tidak lagi stuck tanpa
+//      batas kalau layanan luar hang.
+//   9. Audit log persisten (promotion-audit.log) - siapa (chat id)
+//      membuat promotion apa dan kapan, terlepas dari console log yang
+//      hilang saat terminal ditutup.
+//   10. Validasi jumlah baris Excel sebelum dikirim ke AI - mencegah
+//       file raksasa memicu biaya token besar/proses hang.
+//   11. Whitelist akses opsional lewat ALLOWED_CHAT_IDS di .env.
+//   12. Graceful shutdown (SIGTERM/SIGINT) - proses yang sedang
+//       berjalan dibiarkan selesai dulu sebelum server benar-benar mati.
 //
 // CARA PAKAI:
 //   1. Jalankan ngrok: ngrok http 3000
@@ -23,6 +49,9 @@
 //      ke Telegram saat startup kalau PUBLIC_URL sudah diisi)
 //   4. Cek pendaftaran webhook:
 //      curl https://api.telegram.org/bot<TOKEN>/getWebhookInfo
+//
+// REKOMENDASI: jalankan lewat PM2 ("pm2 start 'npm run gateway' --name
+// hermes") supaya proses tetap hidup & auto-restart kalau crash/reboot.
 //
 // CATATAN: URL ngrok gratis BERUBAH tiap kali ngrok di-restart - berarti
 // PUBLIC_URL di .env juga harus diupdate + bot di-restart tiap kali itu
@@ -75,7 +104,7 @@ const { isUncertainReply, getHelpText } = require("./tools/uncertainty");
 const { askContextualHelp } = require("./tools/contextHelper");
 const { answerPromotionQuestion } = require("./tools/analysisAgent");
 
-const VERSION_TAG = "telegram3-final-v26-webhook-ngrok";
+const VERSION_TAG = "telegram3-final-v29-fix-double-validation";
 
 if (!process.env.TELEGRAM_TOKEN) {
   throw new Error("TELEGRAM_TOKEN belum ada di .env");
@@ -100,10 +129,41 @@ if (!process.env.PUBLIC_URL) {
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || null;
 if (!ADMIN_CHAT_ID) {
   console.warn(
-    "⚠️ ADMIN_CHAT_ID belum diisi di .env - fitur auto-kirim tombol PROMOTION saat start DILEWATI. " +
+    "⚠️ ADMIN_CHAT_ID belum diisi di .env - notifikasi error teknis ke admin DILEWATI. " +
       "User tetap bisa mulai lewat /start atau ketik 'promotion' seperti biasa."
   );
 }
+
+// v28: whitelist akses opsional. Isi ALLOWED_CHAT_IDS di .env dengan
+// daftar chat id dipisah koma (mis. "111111,222222") kalau bot ini
+// hanya boleh dipakai staf tertentu, bukan siapa pun yang menemukan
+// username bot-nya. Kosongkan/hapus env ini untuk membuka akses ke
+// semua orang seperti sebelumnya (perilaku default, tidak berubah).
+const ALLOWED_CHAT_IDS = (process.env.ALLOWED_CHAT_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+if (ALLOWED_CHAT_IDS.length > 0) {
+  console.log(`🔒 Whitelist akses aktif untuk ${ALLOWED_CHAT_IDS.length} chat id.`);
+} else {
+  console.warn(
+    "⚠️ ALLOWED_CHAT_IDS belum diisi - bot TERBUKA untuk siapa pun yang menemukan username-nya di Telegram."
+  );
+}
+function isAllowedChat(chatId) {
+  if (ALLOWED_CHAT_IDS.length === 0) return true; // whitelist tidak aktif = terbuka
+  return ALLOWED_CHAT_IDS.includes(String(chatId));
+}
+
+// v28: batas wajar jumlah baris Excel yang diproses AI dalam satu
+// batch - mencegah file raksasa (sengaja/tidak sengaja) memicu biaya
+// token besar atau membuat proses hang lama.
+const MAX_EXCEL_ROWS = Number(process.env.MAX_EXCEL_ROWS || 500);
+
+// v28: batas waktu (ms) untuk tiap panggilan ke layanan eksternal
+// (login GuestPro, AI finalize/import/analisis) - kalau lewat, chat
+// user diberi tahu, bukan menggantung tanpa batas.
+const EXTERNAL_CALL_TIMEOUT_MS = Number(process.env.EXTERNAL_CALL_TIMEOUT_MS || 45000);
 
 const DEFAULT_GUESTPRO_PROMOTION_URL_TEMPLATE =
   "https://demo-dashboard-merchant.guestpro.co.id/masterdata/v2/promotion/{id}";
@@ -132,6 +192,10 @@ const userState = new Map();
 const manualSessions = new Map();
 const progressMessages = new Map();
 const flagEditSessions = new Map();
+// v27: menyimpan data yang sudah "lolos" alur manual/QnA tapi BELUM
+// benar-benar dikirim ke GuestPro - menunggu user menekan tombol
+// konfirmasi akhir (lihat askFinalConfirmation).
+const pendingSubmissions = new Map();
 
 function getEditingData(chatId) {
   const pf = getPendingFlag(chatId);
@@ -199,6 +263,24 @@ const LIMIT_TITLE_BY_TYPE = {
   timeout: "⌛ KONEKSI KE AI TIMEOUT",
 };
 
+// v27: pesan error yang ramah untuk user awam - detail teknis lengkap
+// tetap dicatat di console.error, dan (kalau ADMIN_CHAT_ID diisi)
+// dikirim ke admin supaya tetap bisa ditelusuri, tanpa membingungkan
+// user yang cuma mau bikin promotion.
+function friendlyError(err, context = "") {
+  console.error(`❌ [${context || "error"}]`, err);
+
+  if (ADMIN_CHAT_ID) {
+    const detail = `⚠️ Error teknis${context ? ` (${context})` : ""}:\n\`${escapeMarkdown(String(err && err.message))}\``;
+    sendPlain(ADMIN_CHAT_ID, detail).catch(() => {});
+  }
+
+  return (
+    "Terjadi kendala saat memproses permintaanmu. Tim teknis sudah diberi tahu.\n\n" +
+    "Coba lagi sebentar lagi, atau ketik *batal* lalu ulangi dari awal."
+  );
+}
+
 // Telegram membatasi ±4096 karakter per pesan. Kalau teks (misal
 // daftar 46+ nama promosi) lebih panjang dari itu, pecah jadi
 // beberapa pesan berurutan - dipecah per BARIS supaya tidak ada
@@ -233,7 +315,6 @@ async function sendLong(chatId, text) {
     await send(chatId, prefix + chunks[i]);
   }
 }
-
 
 async function send(chatId, text, retryCount = 0) {
   const safeText =
@@ -359,6 +440,70 @@ function clearProgress(chatId) {
   progressMessages.delete(chatId);
 }
 
+// v27: indikator "sedang mengetik" native Telegram - dipanggil sebelum
+// pemanggilan AI yang agak lama supaya bot terasa responsif, bukan
+// diam total sampai hasil muncul. Gagal diam-diam (tidak kritikal).
+async function showTyping(chatId) {
+  try {
+    await bot.sendChatAction(chatId, "typing");
+  } catch (_) {
+    // tidak fatal - abaikan
+  }
+}
+
+function resetAllSessions(chatId) {
+  userState.delete(chatId);
+  flagEditSessions.delete(chatId);
+  pendingSubmissions.delete(chatId);
+  resetManualSession(manualSessions, chatId);
+  resetQnASession(chatId);
+  clearProgress(chatId);
+  busyChats.delete(chatId);
+}
+
+// v28: busy-lock per chat - mencegah double-tap tombol atau pesan
+// beruntun memicu proses berat (mis. finalizeAndCreate) dua kali
+// sekaligus untuk chat yang sama, yang bisa berujung promotion dobel.
+const busyChats = new Set();
+
+function isChatBusy(chatId) {
+  return busyChats.has(chatId);
+}
+
+async function withBusyLock(chatId, fn) {
+  if (busyChats.has(chatId)) {
+    await send(chatId, "⏳ Masih memproses permintaan sebelumnya, mohon tunggu sebentar ya.");
+    return;
+  }
+  busyChats.add(chatId);
+  try {
+    return await fn();
+  } finally {
+    busyChats.delete(chatId);
+  }
+}
+
+// v28: bungkus promise dengan batas waktu supaya chat tidak stuck
+// tanpa batas kalau layanan eksternal (login GuestPro, AI, dll) hang.
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Waktu habis: ${label} melebihi ${Math.round(ms / 1000)} detik`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// v28: audit log persisten - siapa membuat promotion apa dan kapan.
+// Terpisah dari console.log supaya tetap ada jejaknya walau terminal
+// ditutup atau proses di-restart.
+const AUDIT_LOG_PATH = path.join(__dirname, "promotion-audit.log");
+function logAudit(entry) {
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n";
+  fs.appendFile(AUDIT_LOG_PATH, line, (err) => {
+    if (err) console.error("❌ Gagal menulis audit log:", err.message);
+  });
+}
+
 setStatusCallback(async (chatId, message, options) => {
   const keyboard =
     options && options.replyMarkup && options.replyMarkup.inline_keyboard
@@ -377,16 +522,56 @@ async function downloadFile(fileId, savePath) {
   await fs.promises.writeFile(savePath, buffer);
 }
 
-// v26: fungsi sendPromotionAgainButton() DIHAPUS. Sebelumnya fungsi
-// ini dipanggil otomatis setiap kali sebuah proses (create manual,
-// import excel, force-create setelah flag, atau cancel) SELESAI -
-// efeknya tombol "🎯 PROMOTION" terus muncul berulang-ulang tiap
-// user selesai bikin promotion, padahal user cuma minta tombol itu
-// muncul saat /start saja. Semua titik pemanggilannya di bawah sudah
-// dihapus juga (lihat komentar "v26" di tiap lokasi).
+// v27: tombol "lanjutan" yang ditempel LANGSUNG ke pesan hasil akhir
+// (bukan pesan terpisah seperti v25, bukan hilang total seperti v26).
+// Dipakai sebagai keyboard kedua argumen updateProgress() di titik-titik
+// hasil sukses/gagal di bawah.
+const CONTINUE_KEYBOARD = [[{ text: "➕ Buat promotion lagi", callback_data: "cmd:promotion" }]];
+
+// v29: PERBAIKAN BUG - askFinalConfirmation sebelumnya SELALU
+// menampilkan tombol "✅ Buat Promotion" tanpa mengecek dulu apakah
+// data valid, sehingga data yang sudah pasti kosong (nama/kode promo)
+// tetap menampilkan opsi "lanjut" - user bisa menekannya, baru GAGAL
+// lagi di finalizeAndCreate(), lalu BARU muncul layar Edit/Batal yang
+// benar. Ini bikin validasi terasa jalan dua kali padahal cukup sekali.
+//
+// Sekarang: cek checkRuleBasedAnomalies() (fungsi rule-based YANG SAMA
+// dipakai executorAgent.js) SEBELUM menampilkan apa pun. Kalau sudah
+// ketahuan kosong, langsung lempar ke runFinalizeAndReport() supaya
+// finalizeAndCreate() yang menangani dari awal - hasilnya user LANGSUNG
+// dapat layar "DATA KOSONG" + tombol Edit/Batal (foto 3), tanpa mampir
+// dulu ke layar "Buat Promotion" yang keliru (foto 2).
+async function askFinalConfirmation(chatId, finalData, sourceFlow, onDoneCleanup) {
+  const ruleReasons = checkRuleBasedAnomalies(finalData);
+  if (ruleReasons.length > 0) {
+    // Data sudah pasti tidak valid - skip layar konfirmasi custom,
+    // biar executorAgent.js yang tangani (flag + tombol Edit/Batal).
+    await runFinalizeAndReport(chatId, finalData, onDoneCleanup);
+    return;
+  }
+
+  pendingSubmissions.set(chatId, { finalData, sourceFlow, onDoneCleanup });
+  userState.set(chatId, "final_confirm_flow");
+
+  let preview;
+  try {
+    preview = buildManualFlagText({ type: "manual", finalData });
+  } catch (_) {
+    preview = `Nama: ${finalData.nama || "-"}`;
+  }
+
+  await sendButtons(chatId, `📋 *Cek dulu sebelum dibuat:*\n\n${preview}`, [
+    [
+      { text: "✅ Buat Promotion", callback_data: "final_confirm:yes" },
+      { text: "✏️ Ubah Data", callback_data: "final_confirm:edit" },
+    ],
+    [{ text: "❌ Batal", callback_data: "final_confirm:no" }],
+  ]);
+}
 
 async function runFinalizeAndReport(chatId, finalData, onDoneCleanup) {
   clearProgress(chatId);
+  await showTyping(chatId);
   await updateProgress(chatId, "⏳ Memproses via AI...");
 
   resetStats();
@@ -394,16 +579,27 @@ async function runFinalizeAndReport(chatId, finalData, onDoneCleanup) {
   const processId = `${chatId}-${Date.now()}`;
 
   try {
-    const outcome = await finalizeAndCreate({
-      chatId,
-      processId,
-      finalData,
-    });
+    const outcome = await withTimeout(
+      finalizeAndCreate({ chatId, processId, finalData }),
+      EXTERNAL_CALL_TIMEOUT_MS,
+      "pembuatan promotion"
+    );
 
     if (outcome.flagged) {
       if (onDoneCleanup) onDoneCleanup();
       return;
     }
+
+    // v28: audit log - jejak siapa (chat id) membuat promotion apa,
+    // berhasil atau tidak, terlepas dari console log yang bisa hilang.
+    logAudit({
+      chatId,
+      action: "create_promotion",
+      nama: finalData.nama,
+      ok: !!outcome.ok,
+      promotionId: outcome.promotionId || null,
+      reason: outcome.ok ? null : outcome.reason || null,
+    });
 
     const resultLine = outcome.ok
       ? `✅ Promotion berhasil dibuat: *${escapeMarkdown(finalData.nama)}*\n` +
@@ -414,12 +610,9 @@ async function runFinalizeAndReport(chatId, finalData, onDoneCleanup) {
     const combinedText =
       resultLine + "\n\n" + formatStatsSummary() + "\n\n" + formatTokenSummary(processId);
 
-    await updateProgress(chatId, combinedText, null);
+    await updateProgress(chatId, combinedText, CONTINUE_KEYBOARD);
     clearProgress(chatId);
-    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
   } catch (err) {
-    console.error("❌ Error saat finalizeAndCreate:", err);
-
     if (err.isLimitError) {
       const title = LIMIT_TITLE_BY_TYPE[err.limitType] || "⚠️ LIMIT AI";
       await updateProgress(
@@ -430,9 +623,8 @@ async function runFinalizeAndReport(chatId, finalData, onDoneCleanup) {
       return;
     }
 
-    await updateProgress(chatId, `❌ ERROR saat membuat promotion: ${escapeMarkdown(err.message)}`, null);
+    await updateProgress(chatId, `❌ ${friendlyError(err, "finalizeAndCreate")}`, CONTINUE_KEYBOARD);
     clearProgress(chatId);
-    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
   }
 
   if (onDoneCleanup) onDoneCleanup();
@@ -440,6 +632,7 @@ async function runFinalizeAndReport(chatId, finalData, onDoneCleanup) {
 
 async function runImportAndReport(chatId, filePath) {
   clearProgress(chatId);
+  await showTyping(chatId);
   await updateProgress(chatId, "📥 Excel diterima & tervalidasi.\n\n⏳ Memproses via AI...");
 
   resetStats();
@@ -447,16 +640,15 @@ async function runImportAndReport(chatId, filePath) {
   const processId = `${chatId}-${Date.now()}`;
 
   try {
-    const result = await finalizeImportExcel({
-      chatId,
-      processId,
-      filePath,
-    });
+    const result = await withTimeout(
+      finalizeImportExcel({ chatId, processId, filePath }),
+      EXTERNAL_CALL_TIMEOUT_MS * 2, // batch excel wajar diberi waktu lebih longgar
+      "import excel"
+    );
 
     if (result.status === "error") {
-      await updateProgress(chatId, "❌ " + escapeMarkdown(result.message), null);
+      await updateProgress(chatId, "❌ " + escapeMarkdown(result.message), CONTINUE_KEYBOARD);
       clearProgress(chatId);
-      // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
     } else if (result.status === "flagged" || result.flagged) {
       return;
     } else {
@@ -468,13 +660,10 @@ async function runImportAndReport(chatId, filePath) {
         "\n\n" +
         formatTokenSummary(processId);
 
-      await updateProgress(chatId, combinedText, null);
+      await updateProgress(chatId, combinedText, CONTINUE_KEYBOARD);
       clearProgress(chatId);
-      // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
     }
   } catch (err) {
-    console.error("❌ Error saat finalizeImportExcel:", err);
-
     if (err.isLimitError) {
       const title = LIMIT_TITLE_BY_TYPE[err.limitType] || "⚠️ LIMIT AI";
       await updateProgress(
@@ -485,9 +674,8 @@ async function runImportAndReport(chatId, filePath) {
       return;
     }
 
-    await updateProgress(chatId, `❌ ERROR:\n\n${escapeMarkdown(err.message)}`, null);
+    await updateProgress(chatId, `❌ ${friendlyError(err, "finalizeImportExcel")}`, CONTINUE_KEYBOARD);
     clearProgress(chatId);
-    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
   } finally {
     fs.unlink(filePath, () => {});
     userState.delete(chatId);
@@ -496,16 +684,14 @@ async function runImportAndReport(chatId, filePath) {
 
 async function reportForceOutcome(chatId, outcome) {
   if (!outcome) {
-    await updateProgress(chatId, "❌ Terjadi kesalahan tak terduga saat memproses konfirmasi.", null);
+    await updateProgress(chatId, "❌ Terjadi kesalahan tak terduga saat memproses konfirmasi.", CONTINUE_KEYBOARD);
     clearProgress(chatId);
-    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
     return;
   }
 
   if (outcome.error) {
-    await updateProgress(chatId, `❌ ${escapeMarkdown(outcome.error)}`, null);
+    await updateProgress(chatId, `❌ ${escapeMarkdown(outcome.error)}`, CONTINUE_KEYBOARD);
     clearProgress(chatId);
-    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
     return;
   }
 
@@ -528,21 +714,19 @@ async function reportForceOutcome(chatId, outcome) {
 
   const combinedText = resultBlock + "\n\n" + formatStatsSummary() + tokenBlock;
 
-  await updateProgress(chatId, combinedText, null);
+  await updateProgress(chatId, combinedText, CONTINUE_KEYBOARD);
   clearProgress(chatId);
-  // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
 }
 
 async function startPromotionFlow(chatId) {
-  userState.delete(chatId);
-  clearProgress(chatId);
+  resetAllSessions(chatId);
 
   try {
     await send(chatId, "🔐 Mengecek status login GuestPro...");
-    const loginResult = await ensureLoggedIn();
+    const loginResult = await withTimeout(ensureLoggedIn(), EXTERNAL_CALL_TIMEOUT_MS, "login GuestPro");
     await send(chatId, `✅ ${escapeMarkdown(loginResult.message)}`);
   } catch (err) {
-    await send(chatId, `❌ Gagal login: ${escapeMarkdown(err.message)}`);
+    await send(chatId, `❌ ${friendlyError(err, "ensureLoggedIn")}`);
     return;
   }
 
@@ -559,13 +743,26 @@ bot.onText(/^\/start$/, async (msg) => {
   const chatId = msg.chat.id;
   await sendButtons(
     chatId,
-    "👋 *Selamat datang di Hermes!*\n\nSaya siap membantu kamu membuat promotion hotel di GuestPro dengan cepat dan mudah - tinggal isi data, saya yang urus sisanya.\n\nYuk, mulai sekarang 👇",
+    "👋 *Selamat datang di Hermes!*\n\n" +
+      "Saya siap membantu kamu membuat promotion hotel di GuestPro dengan cepat dan mudah - tinggal isi data, saya yang urus sisanya.\n\n" +
+      "*Perintah yang tersedia:*\n" +
+      "• */promotion* — mulai buat promotion baru\n" +
+      "• */analisis <pertanyaan>* — tanya statistik promosi\n" +
+      "• *token* — cek pemakaian token AI\n" +
+      "• *batal* — hentikan proses yang sedang berjalan, kapan saja\n\n" +
+      "Yuk, mulai sekarang 👇",
     [[{ text: "🎯 PROMOTION", callback_data: "cmd:promotion" }]]
   );
 });
 
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
+
+  // v28: whitelist akses opsional - lihat ALLOWED_CHAT_IDS di .env.
+  if (!isAllowedChat(chatId)) {
+    console.warn(`🔒 Chat ${chatId} ditolak (tidak ada di ALLOWED_CHAT_IDS).`);
+    return;
+  }
 
   if (msg.document) {
     if (userState.get(chatId) !== "WAIT_EXCEL") return;
@@ -581,18 +778,55 @@ bot.on("message", async (msg) => {
     try {
       await downloadFile(msg.document.file_id, filePath);
     } catch (err) {
-      await send(chatId, `❌ ERROR download file:\n\n${escapeMarkdown(err.message)}`);
+      await send(chatId, `❌ ${friendlyError(err, "downloadFile")}`);
       userState.delete(chatId);
       return;
     }
 
-    await runImportAndReport(chatId, filePath);
+    // v28: validasi jumlah baris SEBELUM dikirim ke AI - mencegah file
+    // raksasa memicu biaya token besar atau proses hang lama.
+    try {
+      const XLSX = require("xlsx");
+      const wb = XLSX.readFile(filePath);
+      const firstSheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
+      if (rows.length > MAX_EXCEL_ROWS) {
+        await send(
+          chatId,
+          `❌ File Excel kamu berisi ${rows.length} baris data, melebihi batas maksimal ${MAX_EXCEL_ROWS} baris per proses.\n\n` +
+            `Silakan pecah jadi beberapa file lebih kecil, lalu upload satu per satu.`
+        );
+        fs.unlink(filePath, () => {});
+        userState.delete(chatId);
+        return;
+      }
+    } catch (err) {
+      // kalau gagal membaca (mis. file corrupt) - biarkan lolos ke
+      // finalizeImportExcel yang punya validasi & pesan error sendiri.
+      console.warn("⚠️ Gagal cek jumlah baris Excel sebelum proses:", err.message);
+    }
+
+    await withBusyLock(chatId, () => runImportAndReport(chatId, filePath));
     return;
   }
 
   if (!msg.text) return;
   const raw = msg.text.trim();
   const text = raw.toLowerCase();
+
+  const mode = userState.get(chatId);
+
+  // ==================== v27: GLOBAL ESCAPE HATCH ====================
+  // Berfungsi kapan saja user sedang di tengah sebuah flow (state apa
+  // pun selain kosong), supaya user awam selalu punya jalan keluar
+  // yang gampang diingat tanpa harus tahu tombol/step spesifik.
+  if (/^(batal|cancel|stop)$/i.test(raw) && mode) {
+    cancelAfterFlag(chatId); // aman dipanggil walau tidak ada pending flag
+    resetAllSessions(chatId);
+    await send(chatId, "🛑 Proses dibatalkan.\n\nKetik */promotion* kalau mau mulai lagi.");
+    return;
+  }
+  // ==================== AKHIR ESCAPE HATCH ====================
 
   if (text === "version" || text === "/version") {
     await send(chatId, `🏷️ Versi bot aktif: *${VERSION_TAG}*\nPID proses: ${process.pid}`);
@@ -606,7 +840,7 @@ bot.on("message", async (msg) => {
 
   // ==================== COMMAND: /promotion ====================
   if (text === "promotion" || text === "/promotion") {
-    await startPromotionFlow(chatId);
+    await withBusyLock(chatId, () => startPromotionFlow(chatId));
     return;
   }
   // ==================== AKHIR COMMAND /promotion ====================
@@ -622,28 +856,32 @@ bot.on("message", async (msg) => {
 
     try {
       await send(chatId, "🔐 Mengecek status login GuestPro...");
-      await ensureLoggedIn();
+      await withTimeout(ensureLoggedIn(), EXTERNAL_CALL_TIMEOUT_MS, "login GuestPro");
     } catch (err) {
-      await send(chatId, `❌ Gagal login: ${escapeMarkdown(err.message)}`);
+      await send(chatId, `❌ ${friendlyError(err, "ensureLoggedIn/analisis")}`);
       return;
     }
 
     await send(chatId, "Baik, mohon ditunggu...");
+    await showTyping(chatId);
 
     const processId = `${chatId}-${Date.now()}`;
 
-    try {
-      const answer = await answerPromotionQuestion({ chatId, processId, question });
-      await sendLong(chatId, answer);
-    } catch (err) {
-      console.error("❌ Error saat analisis AI:", err);
-      await send(chatId, `❌ Gagal analisis: ${escapeMarkdown(err.message)}`);
-    }
+    await withBusyLock(chatId, async () => {
+      try {
+        const answer = await withTimeout(
+          answerPromotionQuestion({ chatId, processId, question }),
+          EXTERNAL_CALL_TIMEOUT_MS,
+          "analisis AI"
+        );
+        await sendLong(chatId, answer);
+      } catch (err) {
+        await send(chatId, `❌ ${friendlyError(err, "answerPromotionQuestion")}`);
+      }
+    });
     return;
   }
   // ==================== AKHIR COMMAND /analisis ====================
-
-  const mode = userState.get(chatId);
 
   if (mode === "CHOOSE_MODE") {
     if (isUncertainReply(raw)) {
@@ -691,9 +929,10 @@ bot.on("message", async (msg) => {
       await send(chatId, result.reply);
     }
 
+    // v27: dulu langsung runFinalizeAndReport - sekarang mampir dulu
+    // ke layar konfirmasi akhir supaya user sempat cek datanya.
     if (result.done && result.data) {
-      await runFinalizeAndReport(chatId, result.data, () => {
-        userState.delete(chatId);
+      await askFinalConfirmation(chatId, result.data, "manual", () => {
         resetManualSession(manualSessions, chatId);
       });
     }
@@ -705,8 +944,7 @@ bot.on("message", async (msg) => {
       const result = await handleQnAMessage(chatId, raw);
 
       if (result.done && result.data) {
-        await runFinalizeAndReport(chatId, result.data, () => {
-          userState.delete(chatId);
+        await askFinalConfirmation(chatId, result.data, "qna", () => {
           resetQnASession(chatId);
         });
         return;
@@ -718,8 +956,7 @@ bot.on("message", async (msg) => {
         await send(chatId, result.reply);
       }
     } catch (err) {
-      console.error("❌ Error di qna_flow:", err);
-      await send(chatId, `❌ Terjadi error: ${escapeMarkdown(err.message)}`);
+      await send(chatId, `❌ ${friendlyError(err, "qna_flow")}`);
     }
     return;
   }
@@ -759,6 +996,11 @@ bot.on("message", async (msg) => {
     return;
   }
 
+  if (mode === "final_confirm_flow") {
+    await send(chatId, "Silakan pilih salah satu tombol di atas dulu (Buat / Ubah / Batal), atau ketik *batal* untuk keluar.");
+    return;
+  }
+
   if (mode === "WAIT_EXCEL") {
     await send(chatId, "Menunggu file Excel (.xlsx). Silakan kirim filenya.");
     return;
@@ -775,6 +1017,13 @@ bot.on("callback_query", async (query) => {
   const messageId = query.message.message_id;
   const data = query.data;
 
+  // v28: whitelist akses opsional - lihat ALLOWED_CHAT_IDS di .env.
+  if (!isAllowedChat(chatId)) {
+    console.warn(`🔒 Chat ${chatId} ditolak (tidak ada di ALLOWED_CHAT_IDS).`);
+    try { await bot.answerCallbackQuery(query.id); } catch (_) {}
+    return;
+  }
+
   try {
     await bot.answerCallbackQuery(query.id);
   } catch (err) {
@@ -787,33 +1036,84 @@ bot.on("callback_query", async (query) => {
     return;
   }
 
+  // ==================== v27: KONFIRMASI AKHIR SEBELUM SUBMIT ====================
+  if (data && data.startsWith("final_confirm:")) {
+    const pending = pendingSubmissions.get(chatId);
+
+    if (!pending) {
+      await editButtons(chatId, messageId, "❌ Sesi konfirmasi sudah kadaluarsa. Ketik */promotion* untuk mulai lagi.", null);
+      userState.delete(chatId);
+      return;
+    }
+
+    if (data === "final_confirm:no") {
+      pendingSubmissions.delete(chatId);
+      await editButtons(chatId, messageId, "❌ Dibatalkan. Data tidak jadi dibuat.", null);
+      resetAllSessions(chatId);
+      return;
+    }
+
+    if (data === "final_confirm:edit") {
+      pendingSubmissions.delete(chatId);
+      await editButtons(chatId, messageId, "✏️ Baik, mari ulangi pengisian datanya:", null);
+      if (pending.sourceFlow === "qna") {
+        userState.set(chatId, "qna_flow");
+        const firstPrompt = startQnA(chatId);
+        await send(chatId, firstPrompt);
+      } else {
+        userState.set(chatId, "manual_flow");
+        const start = startManualSubmode(manualSessions, chatId);
+        await sendButtons(chatId, start.text, start.keyboard);
+      }
+      return;
+    }
+
+    if (data === "final_confirm:yes") {
+      // v28: hapus dari pendingSubmissions SEBELUM proses apa pun -
+      // kalau user sempat tap dua kali, tap kedua tidak akan menemukan
+      // "pending" lagi (sudah masuk cabang di atas: "sesi kadaluarsa").
+      // Ditambah busy-lock sebagai lapisan kedua untuk jaga-jaga.
+      pendingSubmissions.delete(chatId);
+      if (isChatBusy(chatId)) {
+        await bot.answerCallbackQuery(query.id, { text: "Masih diproses, mohon tunggu...", show_alert: false }).catch(() => {});
+        return;
+      }
+      progressMessages.set(chatId, messageId);
+      await editButtons(chatId, messageId, "⏳ Membuat promotion...", null);
+      await withBusyLock(chatId, () => runFinalizeAndReport(chatId, pending.finalData, pending.onDoneCleanup));
+      userState.delete(chatId);
+      return;
+    }
+
+    return;
+  }
+  // ==================== AKHIR KONFIRMASI AKHIR ====================
+
   if (data && data.startsWith("flag_continue:")) {
+    if (isChatBusy(chatId)) {
+      await bot.answerCallbackQuery(query.id, { text: "Masih diproses, mohon tunggu...", show_alert: false }).catch(() => {});
+      return;
+    }
     progressMessages.set(chatId, messageId);
     await editButtons(chatId, messageId, "⏳ Memproses konfirmasi kamu...", null);
-    try {
-      const outcome = await forceCreateAfterFlag(chatId);
-      await reportForceOutcome(chatId, outcome);
-    } catch (err) {
-      console.error("❌ Error saat forceCreateAfterFlag:", err);
-      await updateProgress(chatId, `❌ ERROR saat memproses konfirmasi: ${escapeMarkdown(err.message)}`, null);
-      clearProgress(chatId);
-    }
-    userState.delete(chatId);
-    flagEditSessions.delete(chatId);
-    resetManualSession(manualSessions, chatId);
-    resetQnASession(chatId);
+    await withBusyLock(chatId, async () => {
+      try {
+        const outcome = await withTimeout(forceCreateAfterFlag(chatId), EXTERNAL_CALL_TIMEOUT_MS, "konfirmasi flag");
+        logAudit({ chatId, action: "force_create_after_flag", ok: !outcome?.error, outcome: outcome?.type || null });
+        await reportForceOutcome(chatId, outcome);
+      } catch (err) {
+        await updateProgress(chatId, `❌ ${friendlyError(err, "forceCreateAfterFlag")}`, CONTINUE_KEYBOARD);
+        clearProgress(chatId);
+      }
+    });
+    resetAllSessions(chatId);
     return;
   }
 
   if (data && data.startsWith("flag_cancel:")) {
     cancelAfterFlag(chatId);
     await editButtons(chatId, messageId, "❌ Dibatalkan.", null);
-    clearProgress(chatId);
-    // v26: sendPromotionAgainButton(chatId) DIHAPUS dari sini.
-    userState.delete(chatId);
-    flagEditSessions.delete(chatId);
-    resetManualSession(manualSessions, chatId);
-    resetQnASession(chatId);
+    resetAllSessions(chatId);
     return;
   }
 
@@ -873,8 +1173,7 @@ bot.on("callback_query", async (query) => {
     await editButtons(chatId, messageId, result.reply, result.keyboard);
 
     if (result.done && result.data) {
-      await runFinalizeAndReport(chatId, result.data, () => {
-        userState.delete(chatId);
+      await askFinalConfirmation(chatId, result.data, "manual", () => {
         resetManualSession(manualSessions, chatId);
       });
     }
@@ -896,8 +1195,7 @@ bot.on("callback_query", async (query) => {
 
       if (result.done && result.data) {
         await editButtons(chatId, messageId, result.reply || "Diproses ✅", null);
-        await runFinalizeAndReport(chatId, result.data, () => {
-          userState.delete(chatId);
+        await askFinalConfirmation(chatId, result.data, "qna", () => {
           resetQnASession(chatId);
         });
         return;
@@ -905,8 +1203,7 @@ bot.on("callback_query", async (query) => {
 
       await editButtons(chatId, messageId, result.reply, result.keyboard);
     } catch (err) {
-      console.error("❌ Error di qna_flow (callback):", err);
-      await send(chatId, `❌ Terjadi error: ${escapeMarkdown(err.message)}`);
+      await send(chatId, `❌ ${friendlyError(err, "qna_flow callback")}`);
     }
     return;
   }
@@ -981,7 +1278,7 @@ app.post(WEBHOOK_PATH, (req, res) => {
 // Endpoint simpel buat ngecek server hidup (opsional, berguna pas testing)
 app.get("/", (req, res) => res.send("Hermes webhook aktif ✅"));
 
-app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   console.log(`🤖 Hermes Running [${VERSION_TAG}] - PID ${process.pid}`);
   console.log(`🌐 Webhook server listening di port ${PORT}`);
 
@@ -999,3 +1296,25 @@ app.listen(PORT, async () => {
     );
   }
 });
+
+// v28: graceful shutdown - kalau proses di-kill (mis. saat deploy
+// ulang lewat PM2), tunggu maksimal beberapa detik supaya chat yang
+// sedang diproses (busyChats) sempat selesai dulu sebelum server
+// benar-benar berhenti menerima koneksi baru.
+async function gracefulShutdown(signal) {
+  console.log(`\n🛑 Menerima ${signal} - memulai graceful shutdown...`);
+  server.close(() => console.log("🔌 HTTP server berhenti menerima koneksi baru."));
+
+  const maxWaitMs = 15000;
+  const start = Date.now();
+  while (busyChats.size > 0 && Date.now() - start < maxWaitMs) {
+    console.log(`⏳ Menunggu ${busyChats.size} proses aktif selesai...`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  console.log("👋 Hermes berhenti.");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
