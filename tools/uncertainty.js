@@ -1,27 +1,8 @@
 // ======================================
 // UNCERTAINTY HELPER
-// Deteksi jawaban ambigu/bingung dari user ("gatau", "bingung", dll)
-// di titik-titik keputusan sepanjang bot (pilih Manual/Import, Ya/Tidak
-// formula, konfirmasi ringkasan, dst) - supaya bot ngasih PENJELASAN
-// singkat sesuai konteks, bukan cuma ngulang "pilih salah satu".
-//
-// CARA PAKAI di titik keputusan manapun (bot.js, parserManual.js,
-// qnaFlow.js):
-//
-//   const { isUncertainReply, getHelpText } = require("./tools/uncertainty");
-//
-//   if (isUncertainReply(raw)) {
-//     await send(chatId, getHelpText("CHOOSE_MODE"));
-//     return; // tetap di state yang sama, user bisa jawab ulang
-//   }
-//
-// Kalau ada state baru yang belum ada di HELP_TEXT, getHelpText() akan
-// fallback ke teks generik - jadi aman dipasang di state manapun tanpa
-// perlu didaftarkan dulu, tapi hasilnya lebih bagus kalau didaftarkan.
 // ======================================
 
-// Pola jawaban yang dianggap "user bingung / tidak tahu harus jawab apa".
-// Dicek terhadap versi lowercase + trim dari pesan user.
+
 const UNCERTAIN_PATTERNS = [
   /^(ga|gk|tidak|tak|kurang)?\s*(tau|tahu|ngerti|paham)$/i,
   /^ga+tau+$/i,

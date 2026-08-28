@@ -1,19 +1,5 @@
 // ======================================
 // CONTEXT HELPER - AI TERBATAS KONTEKS
-// Dipanggil HANYA sebagai fallback terakhir, saat jawaban user tidak
-// cocok pola command manapun DAN tidak cocok pola "bingung" sederhana
-// (lihat tools/uncertainty.js) - artinya user menulis kalimat bebas,
-// kemungkinan pertanyaan.
-//
-// AI di sini WAJIB pilih salah satu dari 2 tool (function calling,
-// bukan teks bebas) - sama pola-nya dengan create_promotion/flag_anomaly
-// di executorAgent.js:
-//   - answer_question  -> HANYA kalau pertanyaan berkaitan dengan bot ini
-//   - out_of_context   -> kalau pertanyaan sama sekali di luar topik bot
-//
-// Ini yang membuat AI tidak bisa "ngarang" jawaban ke topik apapun -
-// dia dipaksa milih salah satu jalur, dan jalur out_of_context TIDAK
-// membawa jawaban apapun, cuma penanda "tolak".
 // ======================================
 
 const { GoogleGenAI } = require("@google/genai");

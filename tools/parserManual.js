@@ -1,56 +1,6 @@
 // ==========================================================
 // PARSER MANUAL - GuestPro Promotion Bot
 // ==========================================================
-// (histori PATCH lama: submode, urutan Agent-Rates-Formula, kartu
-// ringkasan, edit per-bagian - lihat versi-versi sebelumnya)
-//
-// PATCH (edit per-ITEM untuk Promo Code & Formula):
-// Sebelumnya menu edit Promo Code / Formula cuma punya 2 aksi:
-// "➕ Tambah" dan "🗑️ Hapus Terakhir". Sekarang menu itu
-// menampilkan DAFTAR semua item yang ada sebagai tombol - tekan
-// salah satu item untuk masuk ke aksi "✏️ Edit" (isi ulang, MENIMPA
-// data lama di index itu, bukan nambah baru) atau "🗑️ Hapus" (hapus
-// SPESIFIK item itu, bukan cuma yang terakhir). Flag lama
-// `_editReturnToSummary` (boolean) diganti jadi `_editReturnTo`
-// (string: null | "summary" | "promoList" | "formulaList") supaya
-// bisa membedakan "setelah ini balik ke ringkasan" (dipakai Agent,
-// Rates, tambah item baru) vs "setelah ini balik ke daftar item"
-// (dipakai saat mengedit item yang sudah ada, supaya user bisa
-// lanjut edit item lain tanpa harus bolak-balik ke ringkasan dulu).
-// Session baru punya `_editingPromoIndex` / `_editingFormulaIndex`
-// untuk menandai index mana yang lagi ditimpa (null = sedang nambah
-// baru, bukan mengedit yang lama).
-//
-// Bug lama checkbox Rates (tidak pre-populate, ri:save cuma nambah)
-// tetap sudah diperbaiki di sini (lihat komentar di ASK_RATES_*).
-//
-// PATCH (BARU - validasi kelengkapan field DIHAPUS dari titik awal
-// template):
-// Sebelumnya, begitu user kirim pesan template pertama kali,
-// TEMPLATE_WAIT_INPUT langsung mengecek findFieldIssues() - kalau ada
-// field kosong (Nama Promotion, Kode Promo, dll), user LANGSUNG
-// diinterupsi dan diminta mengisi satu-satu lewat step
-// TEMPLATE_MISSING_FIELDS, SEBELUM bisa lanjut ke Agent/Rates/
-// Formula.
-//
-// SEKARANG: data dari template diterima APA ADANYA (termasuk field
-// yang kosong), alur langsung lanjut ke ASK_AGENT seperti biasa, lalu
-// terus ke Rates -> Formula -> loop tambahan Promo Code/Formula ->
-// kartu ringkasan (CONFIRM_SUMMARY) - TANPA interupsi apapun soal
-// kelengkapan field. Field yang kosong baru akan terdeteksi & muncul
-// ke user NANTI, di tahap penilaian akhir setelah user menekan
-// "✅ Kirim Sekarang" (ditangani executorAgent.js via
-// findEmptyDataAnomalies/flag_anomaly - LIHAT tools/executorAgent.js).
-//
-// Konsekuensi: case "TEMPLATE_MISSING_FIELDS" DIHAPUS dari state
-// machine (sudah tidak pernah dituju lagi). findFieldIssues() dan
-// fieldPrompt() DIBIARKAN TETAP ADA di file ini (tidak dihapus) -
-// findFieldIssues() sudah tidak dipakai lagi di sini tapi dibiarkan
-// menganggur (aman, tidak mengganggu), sedangkan fieldPrompt() masih
-// dipakai di case "EDIT_BASIC_VALUE" (menu edit "Info Dasar" dari
-// kartu ringkasan). REQUIRED_FIELDS & FIELD_VALIDATORS TETAP DIPAKAI
-// seperti biasa (menu edit "Info Dasar", export module).
-// ==========================================================
 
 // ---------- Konfigurasi field wajib (jalur Template) ----------
 const REQUIRED_FIELDS = [

@@ -1,62 +1,6 @@
 // ======================================
 // TELEGRAM HERMES - FINAL BUILD (v27 - PERBAIKAN UX)
 // ======================================
-// Riwayat:
-// v25 - Mode WEBHOOK LOKAL (bukan polling). Telegram KIRIM update ke
-//        server lokal lewat HTTP POST, diteruskan lewat tunnel publik
-//        (ngrok / Cloudflare Tunnel). State tetap di memory proses yang
-//        sama (Map), tidak dipindah ke database.
-// v26 - Tombol "🎯 PROMOTION" yang otomatis muncul lagi setiap proses
-//        selesai DIHAPUS. Tombol itu hanya muncul di balasan /start.
-// v27 - PERBAIKAN UX (perubahan di build ini):
-//   1. Global escape hatch: ketik "batal"/"cancel"/"stop" kapan saja
-//      saat sedang di tengah flow untuk langsung keluar bersih.
-//   2. Konfirmasi akhir SEBELUM submit: data yang lolos rule-based
-//      check (yang sebelumnya langsung dieksekusi tanpa preview) kini
-//      selalu ditampilkan dulu ke user via tombol "Buat / Ubah / Batal"
-//      sebelum benar-benar dibuat ke GuestPro.
-//   3. Pesan error ke user dibuat ramah (friendlyError) - detail
-//      teknis tetap lengkap di console.error + (opsional) dikirim ke
-//      ADMIN_CHAT_ID, tapi user cuma lihat pesan yang mudah dipahami.
-//   4. Indikator "sedang mengetik" (sendChatAction) dikirim sebelum
-//      pemanggilan AI yang agak lama (finalize & analisis) supaya bot
-//      terasa responsif, bukan diam total.
-//   5. /start sekarang menyebutkan semua command yang tersedia
-//      (promotion, analisis, token, batal) - sebelumnya tersembunyi.
-//   6. Tombol "➕ Buat promotion lagi" ditempel di PESAN HASIL yang
-//      sama setelah promotion berhasil dibuat (bukan pesan/tombol baru
-//      terpisah seperti di v25) - kompromi antara v25 (berisik) dan
-//      v26 (user harus ingat ketik ulang "promotion" manual).
-// v28 - PERBAIKAN ROBUSTNESS (perubahan di build ini):
-//   7. Busy-lock per chat: mencegah double-tap tombol "Buat Promotion"
-//      atau pesan beruntun memicu proses ganda (promotion dobel).
-//   8. Timeout pembungkus untuk semua panggilan eksternal (login,
-//      finalize, import excel, analisis) - chat tidak lagi stuck tanpa
-//      batas kalau layanan luar hang.
-//   9. Audit log persisten (promotion-audit.log) - siapa (chat id)
-//      membuat promotion apa dan kapan, terlepas dari console log yang
-//      hilang saat terminal ditutup.
-//   10. Validasi jumlah baris Excel sebelum dikirim ke AI - mencegah
-//       file raksasa memicu biaya token besar/proses hang.
-//   11. Whitelist akses opsional lewat ALLOWED_CHAT_IDS di .env.
-//   12. Graceful shutdown (SIGTERM/SIGINT) - proses yang sedang
-//       berjalan dibiarkan selesai dulu sebelum server benar-benar mati.
-//
-// CARA PAKAI:
-//   1. Jalankan ngrok: ngrok http 3000
-//   2. Copy URL https yang keluar dari ngrok, isi ke PUBLIC_URL di .env
-//   3. Jalankan bot ini: npm run hermes (webhook otomatis didaftarkan
-//      ke Telegram saat startup kalau PUBLIC_URL sudah diisi)
-//   4. Cek pendaftaran webhook:
-//      curl https://api.telegram.org/bot<TOKEN>/getWebhookInfo
-//
-// REKOMENDASI: jalankan lewat PM2 ("pm2 start 'npm run gateway' --name
-// hermes") supaya proses tetap hidup & auto-restart kalau crash/reboot.
-//
-// CATATAN: URL ngrok gratis BERUBAH tiap kali ngrok di-restart - berarti
-// PUBLIC_URL di .env juga harus diupdate + bot di-restart tiap kali itu
-// terjadi, supaya webhook yang terdaftar ke Telegram tetap valid.
-// ======================================
 
 require("./networkConfig");
 const path = require("path");

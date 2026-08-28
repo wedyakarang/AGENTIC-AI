@@ -1,18 +1,6 @@
 // ==========================================================
 // PENDING FLAGS - Penyimpanan sementara promotion yang di-flag AI
 // ==========================================================
-// Menyimpan payload APA ADANYA (bukan destructuring field spesifik),
-// supaya field milik jalur "manual" (finalData, flagReason,
-// flagSeverity) maupun jalur "import" (type, rows, flaggedDetails,
-// filePath) sama-sama tersimpan utuh tanpa ada yang hilang diam-diam.
-//
-// In-memory (Map), keyed by chatId, dengan auto-expire (lazy check,
-// dicek saat diakses, bukan timer background) — cukup untuk 1 sesi
-// berjalan bot karena user diharapkan merespons dalam hitungan menit.
-//
-// Tambahan: dumpPendingFlagsToFile() untuk lihat isi Map saat ini
-// lewat file, dipicu manual (misal command /debugflags di Telegram).
-// ==========================================================
 
 const fs = require('fs');
 const path = require('path');

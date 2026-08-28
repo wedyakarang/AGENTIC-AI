@@ -1,59 +1,6 @@
 // ==========================================================
 // TOKEN MONITOR - GuestPro Promotion Bot
 // ==========================================================
-// Mencatat pemakaian token LLM setiap kali dipanggil, supaya bisa
-// dipantau berapa banyak token/biaya yang terpakai, DAN sekaligus
-// jadi bukti nyata apakah LLM benar-benar terpanggil atau tidak.
-//
-// PERUBAHAN TERBARU (fix breakdown token yang tidak sinkron):
-//   - Sebelumnya recordUsage() cuma menyimpan prompt_tokens &
-//     completion_tokens, sementara total_tokens diambil MENTAH dari
-//     Gemini (usageMetadata.totalTokenCount). Karena total_tokens
-//     selalu terisi (truthy), baris:
-//         const totalTokens = usage.total_tokens || promptTokens + completionTokens;
-//     TIDAK PERNAH masuk ke jalur fallback penjumlahan manual - jadi
-//     kalau Gemini punya kategori token lain di luar prompt+completion
-//     (thoughtsTokenCount = reasoning internal, toolUsePromptTokenCount
-//     = biaya memproses schema tool declaration, cachedContentTokenCount
-//     = context cache), selisihnya "menghilang" dari breakdown yang
-//     ditampilkan ke user meskipun tetap dihitung ke biaya.
-//   - Sekarang recordUsage() menerima (opsional) thoughts_tokens,
-//     tool_use_prompt_tokens, cached_tokens - field ini disimpan
-//     apa adanya dan ditampilkan terpisah di breakdown, BUKAN
-//     disembunyikan di dalam total_tokens.
-//   - Ditambahkan reconciled = totalTokens - (prompt+completion+
-//     thoughts+toolUse+cached). Kalau masih ada selisih setelah
-//     semua kategori dikenal dijumlahkan (misal Gemini nambah field
-//     baru lagi di masa depan), sisanya ditandai jujur sebagai
-//     "lainnya" - bukan disembunyikan atau bikin angka tidak match.
-//   - formatTokenSummary() sekarang HANYA menampilkan 3 blok: Proses
-//     Terakhir, Hari Ini, Sepanjang Waktu - breakdown per jalur/fitur
-//     dan catatan tambahan di bawahnya (peringatan 0 panggilan, info
-//     panggilan terakhir) sudah dihapus supaya laporan ringkas.
-//
-// Cara pakai (di tools/executorAgent.js):
-//
-//   const { recordUsage } = require("./tokenMonitor");
-//
-//   recordUsage({
-//     chatId,
-//     processId,                 // id 1 alur promotion penuh
-//     feature: "flow:nama",      // label fitur/jalur
-//     model,                     // string model yang dipakai
-//     usage,                     // { prompt_tokens, completion_tokens,
-//                                //   thoughts_tokens?, tool_use_prompt_tokens?,
-//                                //   cached_tokens?, total_tokens }
-//   });
-//
-// Cara lihat ringkasan (dari telegram3.js):
-//
-//   const { formatTokenSummary } = require("./tools/tokenMonitor");
-//   await send(chatId, formatTokenSummary(processId)); // proses spesifik
-//   await send(chatId, formatTokenSummary());           // entry terakhir di file
-//
-// Data disimpan di file JSON (default: data/tokenUsage.json) supaya
-// tetap ada walau bot di-restart.
-// ==========================================================
 
 const fs = require("fs");
 const path = require("path");
@@ -61,11 +8,7 @@ const path = require("path");
 const DATA_DIR = path.join(__dirname, "..", "data");
 const DATA_FILE = path.join(DATA_DIR, "tokenUsage.json");
 
-// Harga per 1M token (USD). Silakan sesuaikan sesuai model & harga
-// yang aktif dipakai (lihat tools/executorAgent.js -> const MODEL).
-// CATATAN: thoughts_tokens & tool_use_prompt_tokens biasanya ditagih
-// dengan rate OUTPUT oleh Gemini (bukan input) - kalau provider kamu
-// beda, sesuaikan di estimateCost().
+
 const PRICING = {
   "gpt-4o-mini": { input: 0.15, output: 0.6 },
   "gpt-4o": { input: 2.5, output: 10.0 },

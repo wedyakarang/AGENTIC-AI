@@ -503,6 +503,34 @@
       "cachedTokens": 0,
       "otherTokens": 0,
       "totalTokens": 1829
+    },
+    {
+      "ts": "2026-08-27T07:37:31.412Z",
+      "chatId": "2138877209",
+      "processId": "2138877209-1787816248128",
+      "feature": "executor:analisis-ai",
+      "model": "gemini-3.1-flash-lite",
+      "promptTokens": 1762,
+      "completionTokens": 53,
+      "thoughtsTokens": 0,
+      "toolUsePromptTokens": 0,
+      "cachedTokens": 0,
+      "otherTokens": 0,
+      "totalTokens": 1815
+    },
+    {
+      "ts": "2026-08-28T01:43:26.851Z",
+      "chatId": "2138877209",
+      "processId": "2138877209-1787881404968",
+      "feature": "executor:analisis-ai",
+      "model": "gemini-3.1-flash-lite",
+      "promptTokens": 1761,
+      "completionTokens": 62,
+      "thoughtsTokens": 0,
+      "toolUsePromptTokens": 0,
+      "cachedTokens": 0,
+      "otherTokens": 0,
+      "totalTokens": 1823
     }
   ]
 }

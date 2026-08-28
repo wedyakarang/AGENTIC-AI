@@ -1,16 +1,6 @@
 // ======================================
 // PROMOTION API FINAL
 // Direct Fetch API GuestPro
-//
-// PENTING: API GuestPro menerima multipart/form-data dengan SATU field
-// bernama "new_item" berisi seluruh JSON payload sebagai string — BUKAN
-// application/json biasa. Ini ditemukan dari cURL request asli browser
-// (form-data name="new_item"). Error 'new_item' sebelumnya adalah
-// KeyError backend karena field itu tidak ada saat kita kirim JSON polos.
-//
-// MONITORING: tiap panggilan POST create promotion dicatat ke
-// apiMonitor.js (durasi + sukses/gagal) supaya bisa dipantau dari
-// Telegram lewat formatStatsSummary().
 // ======================================
 
 const { API_ORIGIN, ENDPOINTS } = require("./config");

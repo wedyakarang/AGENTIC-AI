@@ -1,23 +1,7 @@
 // ======================================
 // NETWORK CONFIG — Naikkan limit koneksi bersamaan untuk fetch()
 // ======================================
-//
-// MASALAH: Node.js fetch() bawaan (via undici) punya batas default
-// jumlah koneksi BERSAMAAN ke 1 origin/domain yang sama (defaultnya
-// kecil, sekitar 6). Jadi walau kode kita kirim 15 request sekaligus
-// (CONCURRENCY_LIMIT = 15 di excell.js), Node sendiri cuma benar-benar
-// membuka beberapa koneksi dulu — sisanya ANTRE nunggu slot kosong,
-// bukan benar-benar jalan bersamaan.
-//
-// SOLUSI: Buat instance undici Agent dengan limit lebih tinggi, lalu
-// jadikan itu "dispatcher" default untuk SEMUA fetch() di seluruh
-// aplikasi (lewat setGlobalDispatcher). File ini WAJIB di-require
-// PALING ATAS, SEBELUM file lain yang pakai fetch() dipanggil.
-//
-// CARA PAKAI: tambahkan baris ini di paling atas telegram2.js,
-// SEBELUM require lain:
-//     require("./networkConfig");
-// ======================================
+
 
 const { Agent, setGlobalDispatcher } = require("undici");
 

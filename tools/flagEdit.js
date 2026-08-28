@@ -1,20 +1,5 @@
 // ==========================================================
 // FLAG EDIT - helper util MURNI (tanpa I/O, tanpa require lain) untuk
-// membangun menu edit field pada 1 objek data promotion.
-//
-// Dipakai untuk 2 konteks dari telegram3.js:
-// - Jalur Manual yang di-flag: mengedit pendingFlag.finalData langsung
-//   (cuma 1 objek).
-// - Jalur Import yang di-flag: mengedit salah satu
-//   pendingFlag.flaggedRows[i].data (banyak baris, user pilih dulu
-//   baris mana lewat buildRowListKeyboard()).
-//
-// PATCH: field yang bisa diedit SEKARANG dipersempit jadi HANYA dua
-// hal yang bisa memicu flag rule-based di executorAgent.js (versi
-// baru): nama promotion, dan setiap promoCodes[].kode. Menu formula
-// (DECREASE/INCREASE, AMOUNT/PERCENT), minimumNight, dan maxUsed
-// SUDAH DIHAPUS dari sini karena tidak lagi relevan dengan validasi
-// (data itu tidak pernah membuat status jadi "DATA KOSONG").
 // ==========================================================
 
 function buildFieldMenuKeyboard(data, backCallback) {

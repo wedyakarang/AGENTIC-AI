@@ -1,24 +1,5 @@
 // ======================================
 // AUTH MODULE
-// Playwright DIPAKAI HANYA UNTUK LOGIN. Setelah login manual, token
-// dibaca dari localStorage, browser ditutup, semua request selanjutnya
-// pakai fetch() biasa.
-//
-// SESSION PERSISTENCE: HANYA TOKEN yang disimpan permanen (ke
-// AUTH_STATE_FILE), BUKAN folder session Chrome.
-//
-// VALIDASI SESSION: isSessionValid() TIDAK menebak umur token sendiri.
-// Dia tanya ke server GuestPro lewat CURRENT_USER_ENDPOINT. Kalau
-// server bilang 401/403 -> token invalid, dianggap expired. Kalau
-// network/server error (500, timeout) -> TIDAK langsung dianggap
-// expired, supaya bot tidak maksa login manual gara-gara GuestPro
-// lagi gangguan sesaat.
-//
-// UMUR TOKEN (BARU): getSessionRemainingDays() TIDAK LAGI pakai
-// SESSION_MAX_AGE_MS hardcode. Sekarang dibaca LANGSUNG dari klaim
-// "exp" di dalam JWT itu sendiri - klaim ini ditandatangani oleh
-// server GuestPro saat token diterbitkan, jadi umurnya memang
-// ditentukan oleh server/API, bukan ditebak di kode kita.
 // ======================================
 
 const fs = require("fs");

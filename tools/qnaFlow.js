@@ -1,18 +1,6 @@
 // ==========================================================
 // QNA FLOW - GuestPro Promotion Bot (TANPA LLM SAMA SEKALI)
 // ==========================================================
-// (histori PATCH lama: submode via kartu ringkasan, edit per-bagian
-// - lihat versi-versi sebelumnya)
-//
-// PATCH (BARU - edit per-ITEM untuk Promo Code & Formula):
-// Sama seperti parserManual.js: menu edit Promo Code / Formula
-// sekarang menampilkan daftar item, tiap item bisa di-Edit (timpa)
-// atau Hapus (spesifik, bukan cuma yang terakhir). Bedanya dengan
-// jalur Template: di sini SEMUA kode promo (termasuk yang pertama)
-// ada di satu array yang sama, session.data.promoCodes - jadi tidak
-// ada pengecualian "kode pertama diedit lewat Info Dasar" seperti di
-// parserManual.js.
-// ==========================================================
 
 const {
   RATES_CATALOG,

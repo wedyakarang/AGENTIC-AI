@@ -1,16 +1,5 @@
 // ======================================
 // SCRIPT DIAGNOSA KECEPATAN
-// Jalankan file Excel yang SAMA (15 baris) dua kali:
-//   1) Dengan CONCURRENCY_LIMIT = 1 (baseline sequential)
-//   2) Dengan CONCURRENCY_LIMIT = 15 (full paralel)
-// Lalu bandingkan waktunya di sini.
-//
-// CARA PAKAI:
-//   node diagnose.js path/ke/file.xlsx
-//
-// PENTING: networkConfig.js WAJIB di-require PALING ATAS di sini juga
-// (bukan cuma di telegram2.js) supaya limit koneksi yang dinaikkan
-// benar-benar aktif saat diagnose.js dijalankan sendiri/terpisah.
 // ======================================
 
 require("./networkConfig"); // <-- WAJIB PALING ATAS, sebelum require lain

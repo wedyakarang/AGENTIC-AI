@@ -1,15 +1,5 @@
 // ======================================
 // MATCHER
-// Fuzzy string matching ringan, TANPA dependency eksternal (murni JS,
-// tidak perlu npm install apa pun).
-//
-// Dipakai resolv.js untuk mencocokkan nama rate/agent yang diketik user
-// secara bebas (typo, singkatan, sebagian nama) terhadap daftar resmi
-// dari API GuestPro - SEBELUM (dan supaya TIDAK PERLU) melempar ke LLM.
-//
-// LLM baru dipanggil kalau hasil fuzzy match di sini benar-benar ambigu
-// (skor mepet / ada lebih dari satu kandidat yang sama-sama kuat).
-// Taruh file ini di folder tools/ (sejajar dengan tokenMonitor.js).
 // ======================================
 
 function levenshtein(a, b) {
