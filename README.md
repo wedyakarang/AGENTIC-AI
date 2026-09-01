@@ -117,37 +117,6 @@ pm2 logs hermes
 - Jangan share WEBHOOK_SECRET kamu — siapa pun yang tahu URL webhook lengkap (termasuk secret ini) bisa mengirim update palsu ke bot kamu.
 - Kalau ada error saat npm install atau npx playwright install, pastikan koneksi internet stabil dan coba jalankan setup.bat ulang.
 
-## Referensi Provider LLM
-
-Folder ini berisi referensi implementasi beberapa provider Large Language Model (LLM).
-
-File-file ini tidak otomatis digunakan oleh bot. Provider aktif hanya akan berubah jika implementasinya dipanggil atau diintegrasikan ke sistem utama.
-
-### Provider yang tersedia
-
-| Provider | File Referensi |
-| --- | --- |
-| DeepSeek | [Lihat kode DeepSeek](provider/AI%20AN/deepseek.js) |
-| Gemini | [Lihat kode Gemini](provider/AI%20AN/gemini.js) |
-| OpenAI | [Lihat kode OpenAI](provider/AI%20AN/openai.js) |
-
-### Catatan
-
-- Folder provider digunakan sebagai referensi implementasi alternatif.
-- Kode provider tidak berjalan secara otomatis hanya karena file tersebut berada di folder `provider/`.
-- Provider aktif dapat diganti dengan mengambil atau mengintegrasikan kode dari file yang sesuai.
-- API key sebaiknya tetap menggunakan environment variable dan tidak ditulis langsung di dalam kode.
-
-### Struktur Folder
-
-```text
-provider/
-└── AI AN/
-    ├── deepseek.js
-    ├── gemini.js
-    └── openai.js
-```
-
 ## Troubleshooting
 
 | Masalah | Solusi |
