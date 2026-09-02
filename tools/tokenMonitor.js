@@ -287,6 +287,36 @@ function formatTokenSummary(processId = null) {
 }
 
 // ============================================================
+// BARU — RINGKASAN TOKEN UNTUK 1 PROSES SAJA (dipakai /analisis,
+// dll - versi ringkas, cuma bagian "Proses Terakhir", tanpa Hari
+// Ini / Sepanjang Waktu). Kalau processId tidak ketemu di data
+// (mis. dijawab dari cache/jalur cepat keyword tanpa panggil AI),
+// ditampilkan sebagai 0 token terpakai, BUKAN pesan "GAGAL TOTAL"
+// seperti di formatTokenSummary() yang memang untuk kasus error.
+// ============================================================
+function formatLastProcessTokenSummary(processId = null) {
+  const stats = getStats(processId);
+  const p = stats.lastProcess;
+
+  const lines = [];
+  lines.push("📊 *Monitoring Token LLM*");
+  lines.push("");
+  lines.push("*Proses Terakhir* (1 alur promotion):");
+
+  if (p && p.notFound) {
+    lines.push("  Tidak ada pemanggilan AI untuk proses ini (dijawab dari cache/pola cepat, 0 token terpakai).");
+  } else if (p) {
+    lines.push(`  Panggilan LLM: ${fmtNum(p.totalCalls)}`);
+    lines.push(`  Token: ${fmtNum(p.totalTokens)} (${buildTokenBreakdownLine(p)})`);
+    lines.push(`  Estimasi biaya: ${buildCostLine(p.cost)}`);
+  } else {
+    lines.push("  (belum ada proses tercatat)");
+  }
+
+  return lines.join("\n");
+}
+
+// ============================================================
 // RESET (opsional, kalau mau bersihkan data lama)
 // ============================================================
 function resetUsage() {
@@ -298,5 +328,6 @@ module.exports = {
   getStats,
   getLastProcessStats,
   formatTokenSummary,
+  formatLastProcessTokenSummary,
   resetUsage,
 };

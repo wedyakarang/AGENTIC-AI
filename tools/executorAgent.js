@@ -1,8 +1,9 @@
 // // ==========================================================
 // // EXECUTOR AGENT - SATU-SATUNYA TITIK LLM DI SELURUH BOT
+// // (VERSI GEMINI)
 // // ==========================================================
 
-const OpenAI = require("openai");
+const { GoogleGenerativeAI, SchemaType } = require("@google/generative-ai");
 const { recordUsage } = require("./tokenMonitor");
 const { createPromotionTool } = require("../indexxx");
 
@@ -21,56 +22,91 @@ function setStatusCallback(callback) {
 }
 
 // ==========================================================
-// OPENAI CONFIG
+// GEMINI CONFIG
 // ==========================================================
 
-const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const MODEL = "gpt-5.4-mini";
-const REQUEST_TIMEOUT_MS = 20000;
-const REASONING_EFFORT = "none";
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-const OPENAI_RETRY_ATTEMPTS = 2; // total percobaan = 1 + ini (jadi 3x)
+const MODEL = "gemini-3.5-flash"; // Ganti sesuai kebutuhan (mis. "gemini-2.5-pro" kalau butuh kualitas lebih tinggi).
+const REQUEST_TIMEOUT_MS = 20000;
+
+const OPENAI_RETRY_ATTEMPTS = 2; // total percobaan = 1 + ini (jadi 3x) — nama var dipertahankan biar diff minimal
 const OPENAI_RETRY_BASE_DELAY_MS = 1000; // 1s, lalu 3s (backoff x3)
 
 const IMPORT_DIRECT_CONCURRENCY = 10;
 const IMPORT_FORCE_CONCURRENCY = 10;
 
 // ==========================================================
-// HELPER: BANGUN OBJEK usage LENGKAP DARI usage OPENAI
+// KONVERSI JSON SCHEMA BIASA -> SCHEMA GEMINI (SchemaType enum)
 // ==========================================================
-function buildUsagePayload(usage) {
+function toGeminiSchema(schema) {
+  if (!schema || typeof schema !== "object") return schema;
+
+  const TYPE_MAP = {
+    object: SchemaType.OBJECT,
+    string: SchemaType.STRING,
+    array: SchemaType.ARRAY,
+    number: SchemaType.NUMBER,
+    integer: SchemaType.INTEGER,
+    boolean: SchemaType.BOOLEAN
+  };
+
+  const out = {};
+
+  if (schema.type) {
+    out.type = TYPE_MAP[schema.type] || schema.type;
+  }
+  if (schema.description) out.description = schema.description;
+  if (schema.enum) out.enum = schema.enum;
+
+  if (schema.properties) {
+    out.properties = {};
+    for (const [key, val] of Object.entries(schema.properties)) {
+      out.properties[key] = toGeminiSchema(val);
+    }
+  }
+
+  if (schema.items) out.items = toGeminiSchema(schema.items);
+  if (schema.required) out.required = schema.required;
+
+  return out;
+}
+
+// ==========================================================
+// HELPER: BANGUN OBJEK usage LENGKAP DARI usageMetadata GEMINI
+// ==========================================================
+function buildUsagePayload(usageMetadata) {
   return {
-    prompt_tokens: usage.prompt_tokens ?? 0,
-    completion_tokens: usage.completion_tokens ?? 0,
-    thoughts_tokens: usage.completion_tokens_details?.reasoning_tokens ?? 0,
+    prompt_tokens: usageMetadata.promptTokenCount ?? 0,
+    completion_tokens: usageMetadata.candidatesTokenCount ?? 0,
+    thoughts_tokens: usageMetadata.thoughtsTokenCount ?? 0,
     tool_use_prompt_tokens: 0,
-    cached_tokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
-    total_tokens: usage.total_tokens ?? 0
+    cached_tokens: usageMetadata.cachedContentTokenCount ?? 0,
+    total_tokens: usageMetadata.totalTokenCount ?? 0
   };
 }
 
 // ==========================================================
-// KLASIFIKASI ERROR OPENAI
+// KLASIFIKASI ERROR GEMINI
 // ==========================================================
 
 function classifyOpenAIError(err) {
   const status = err && (err.status || err.statusCode);
-  const code = (err && (err.code || err.error?.code) ? String(err.code || err.error?.code) : "").toLowerCase();
   const msg = (err && err.message ? err.message : "").toLowerCase();
 
   if (msg.includes("timeout")) {
     return { type: "timeout", title: "⌛ KONEKSI KE AI TIMEOUT" };
   }
-  if (status === 503 || status === 500 || code.includes("server_error") || msg.includes("overloaded")) {
+  if (status === 503 || status === 500 || msg.includes("overloaded") || msg.includes("unavailable")) {
     return { type: "overloaded", title: "🔥 MODEL AI SEDANG PADAT (5xx)" };
   }
-  if (status === 429 || code.includes("rate_limit") || msg.includes("rate limit")) {
+  if (status === 429 || msg.includes("rate limit") || msg.includes("resource_exhausted")) {
     return { type: "rate_limit", title: "⏳ KENA RATE LIMIT AI" };
   }
-  if (code.includes("insufficient_quota") || msg.includes("quota") || msg.includes("billing")) {
+  if (status === 403 || msg.includes("quota") || msg.includes("billing") || msg.includes("permission")) {
     return { type: "quota", title: "💳 KUOTA / IZIN AI BERMASALAH" };
   }
-  if (status === 400 || code.includes("invalid_request_error")) {
+  if (status === 400 || msg.includes("invalid_argument") || msg.includes("invalid argument")) {
     return { type: "invalid_argument", title: "⚠️ SKEMA TOOL AI SALAH" };
   }
   return { type: "other", title: "⚠️ AI GAGAL DIPANGGIL" };
@@ -104,6 +140,8 @@ async function notifyFallback(chatId, err, contextLabel) {
 
 // ==========================================================
 // TOOL 1: CREATE PROMOTION (dipakai jalur Manual & jalur Import)
+// Skema ditulis dalam JSON Schema biasa (sumber kebenaran tunggal),
+// dikonversi ke format Gemini lewat toGeminiSchema() saat model dibuat.
 // ==========================================================
 
 const CREATE_PROMOTION_FUNCTION = {
@@ -200,9 +238,48 @@ const SUMMARIZE_ANOMALIES_FUNCTION = {
   }
 };
 
-const CREATE_PROMOTION_TOOL = { type: "function", function: CREATE_PROMOTION_FUNCTION };
-const FLAG_ANOMALY_TOOL = { type: "function", function: FLAG_ANOMALY_FUNCTION };
-const SUMMARIZE_ANOMALIES_TOOL = { type: "function", function: SUMMARIZE_ANOMALIES_FUNCTION };
+// Deklarasi versi Gemini (hasil konversi toGeminiSchema)
+const CREATE_PROMOTION_DECLARATION = {
+  name: CREATE_PROMOTION_FUNCTION.name,
+  description: CREATE_PROMOTION_FUNCTION.description,
+  parameters: toGeminiSchema(CREATE_PROMOTION_FUNCTION.parameters)
+};
+
+const FLAG_ANOMALY_DECLARATION = {
+  name: FLAG_ANOMALY_FUNCTION.name,
+  description: FLAG_ANOMALY_FUNCTION.description,
+  parameters: toGeminiSchema(FLAG_ANOMALY_FUNCTION.parameters)
+};
+
+const SUMMARIZE_ANOMALIES_DECLARATION = {
+  name: SUMMARIZE_ANOMALIES_FUNCTION.name,
+  description: SUMMARIZE_ANOMALIES_FUNCTION.description,
+  parameters: toGeminiSchema(SUMMARIZE_ANOMALIES_FUNCTION.parameters)
+};
+
+// ==========================================================
+// HELPER: BANGUN MODEL GEMINI DENGAN SET TOOL TERTENTU, DIPAKSA
+// MEMANGGIL SALAH SATU TOOL (mode: "ANY" ~ pengganti tool_choice:"required")
+// ==========================================================
+function buildModel(functionDeclarations, allowedFunctionNames) {
+  return genAI.getGenerativeModel({
+    model: MODEL,
+    tools: [{ functionDeclarations }],
+    toolConfig: {
+      functionCallingConfig: {
+        mode: "ANY",
+        allowedFunctionNames
+      }
+    }
+  });
+}
+
+const manualCheckModel = buildModel(
+  [CREATE_PROMOTION_DECLARATION, FLAG_ANOMALY_DECLARATION],
+  ["create_promotion", "flag_anomaly"]
+);
+const summarizeModel = buildModel([SUMMARIZE_ANOMALIES_DECLARATION], ["summarize_anomalies"]);
+const batchCreateModel = buildModel([CREATE_PROMOTION_DECLARATION], ["create_promotion"]);
 
 // ==========================================================
 // KRITERIA YANG DINILAI AI (jalur Manual) — HANYA soal kelengkapan
@@ -238,14 +315,9 @@ function argsStructurallyMatch(aiArgs, original) {
   return true;
 }
 
-function safeParseToolArgs(rawArguments) {
-  try {
-    return JSON.parse(rawArguments);
-  } catch (err) {
-    console.warn("⚠️ Gagal parse JSON argumen tool dari AI:", err.message);
-    return null;
-  }
-}
+// NOTE: Gemini mengembalikan functionCall.args SEBAGAI OBJECT LANGSUNG,
+// jadi tidak perlu safeParseToolArgs (JSON.parse) seperti versi
+// OpenAI/DeepSeek. Fungsi ini sengaja TIDAK ADA di versi ini.
 
 // ==========================================================
 // TIMEOUT HELPER
@@ -271,7 +343,7 @@ function withTimeout(promise, ms) {
 }
 
 // ==========================================================
-// RETRY-WITH-BACKOFF UNTUK PANGGILAN OPENAI
+// RETRY-WITH-BACKOFF UNTUK PANGGILAN GEMINI
 // ==========================================================
 async function callOpenAIWithRetry(requestFn, { contextLabel = "" } = {}) {
   let lastErr;
@@ -287,7 +359,7 @@ async function callOpenAIWithRetry(requestFn, { contextLabel = "" } = {}) {
 
       const delayMs = OPENAI_RETRY_BASE_DELAY_MS * Math.pow(3, attempt);
       console.warn(
-        `⚠️ OpenAI 5xx/overloaded saat ${contextLabel || "(tanpa label)"} - retry ${attempt + 1}/${OPENAI_RETRY_ATTEMPTS} setelah ${delayMs}ms...`
+        `⚠️ Gemini 5xx/overloaded saat ${contextLabel || "(tanpa label)"} - retry ${attempt + 1}/${OPENAI_RETRY_ATTEMPTS} setelah ${delayMs}ms...`
       );
       await sleep(delayMs);
     }
@@ -430,29 +502,30 @@ async function finalizeAndCreate({ chatId, processId, finalData }) {
   let argsToUse = finalData;
 
   try {
-    const response = await callOpenAIWithRetry(
+    const result = await callOpenAIWithRetry(
       () =>
-        ai.chat.completions.create({
-          model: MODEL,
-          reasoning_effort: REASONING_EFFORT,
-          messages: [
+        manualCheckModel.generateContent({
+          contents: [
             {
               role: "user",
-              content:
-                DATA_CHECK_CRITERIA +
-                "\n\nData promotion yang akan diproses:\n\n" +
-                JSON.stringify(finalData)
+              parts: [
+                {
+                  text:
+                    DATA_CHECK_CRITERIA +
+                    "\n\nData promotion yang akan diproses:\n\n" +
+                    JSON.stringify(finalData)
+                }
+              ]
             }
           ],
-          tools: [CREATE_PROMOTION_TOOL, FLAG_ANOMALY_TOOL],
-          tool_choice: "required",
-          max_completion_tokens: 3000
+          generationConfig: { maxOutputTokens: 3000 }
         }),
       { contextLabel: "create_promotion" }
     );
 
-    const usage = response.usage || {};
-    console.log("🔍 usage mentah dari OpenAI (create):", JSON.stringify(usage));
+    const response = result.response;
+    const usage = response.usageMetadata || {};
+    console.log("🔍 usage mentah dari Gemini (create):", JSON.stringify(usage));
 
     recordUsage({
       chatId,
@@ -462,11 +535,11 @@ async function finalizeAndCreate({ chatId, processId, finalData }) {
       usage: buildUsagePayload(usage)
     });
 
-    const toolCalls = response.choices?.[0]?.message?.tool_calls || [];
-    const call = toolCalls.find(tc => tc.type === "function");
-    const callArgs = call ? safeParseToolArgs(call.function.arguments) : null;
+    const functionCalls = response.functionCalls() || [];
+    const call = functionCalls[0];
+    const callArgs = call ? call.args : null;
 
-    if (call && call.function.name === "flag_anomaly" && callArgs) {
+    if (call && call.name === "flag_anomaly" && callArgs) {
       const flagInfo = {
         reason: callArgs.reason || "Nama promotion dan/atau kode promo kosong"
       };
@@ -496,14 +569,14 @@ async function finalizeAndCreate({ chatId, processId, finalData }) {
       };
     }
 
-    if (call && call.function.name === "create_promotion" && callArgs) {
-      console.log("🤖 AI TOOL:", call.function.name);
+    if (call && call.name === "create_promotion" && callArgs) {
+      console.log("🤖 AI TOOL:", call.name);
       console.log("📦 ARG dari AI:", callArgs);
 
       if (statusCallback) {
         await statusCallback(
           chatId,
-          "🤖 AI: DATA AMAN, memanggil tool:\n\n" + "🛠 " + call.function.name
+          "🤖 AI: DATA AMAN, memanggil tool:\n\n" + "🛠 " + call.name
         );
       }
 
@@ -571,30 +644,31 @@ async function reviewFlaggedImportRowsViaAI({ chatId, processId, flaggedRows }) 
     data: r.data
   }));
 
-  const response = await callOpenAIWithRetry(
+  const result = await callOpenAIWithRetry(
     () =>
-      ai.chat.completions.create({
-        model: MODEL,
-        reasoning_effort: REASONING_EFFORT,
-        messages: [
+      summarizeModel.generateContent({
+        contents: [
           {
             role: "user",
-            content:
-              "Berikut daftar baris promotion dari file Excel yang SUDAH ditandai oleh sistem rule-based karena " +
-              "nama promotion dan/atau kode promonya masih kosong. Buat ringkasannya lewat tool summarize_anomalies, " +
-              "sebutkan per baris field mana yang kosong.\n\n" +
-              JSON.stringify(payload)
+            parts: [
+              {
+                text:
+                  "Berikut daftar baris promotion dari file Excel yang SUDAH ditandai oleh sistem rule-based karena " +
+                  "nama promotion dan/atau kode promonya masih kosong. Buat ringkasannya lewat tool summarize_anomalies, " +
+                  "sebutkan per baris field mana yang kosong.\n\n" +
+                  JSON.stringify(payload)
+              }
+            ]
           }
         ],
-        tools: [SUMMARIZE_ANOMALIES_TOOL],
-        tool_choice: "required",
-        max_completion_tokens: 1500
+        generationConfig: { maxOutputTokens: 1500 }
       }),
     { contextLabel: "review-import-batch" }
   );
 
-  const usage = response.usage || {};
-  console.log("🔍 usage mentah dari OpenAI (review import batch):", JSON.stringify(usage));
+  const response = result.response;
+  const usage = response.usageMetadata || {};
+  console.log("🔍 usage mentah dari Gemini (review import batch):", JSON.stringify(usage));
 
   recordUsage({
     chatId,
@@ -604,11 +678,10 @@ async function reviewFlaggedImportRowsViaAI({ chatId, processId, flaggedRows }) 
     usage: buildUsagePayload(usage)
   });
 
-  const toolCalls = response.choices?.[0]?.message?.tool_calls || [];
-  const call = toolCalls.find(tc => tc.type === "function" && tc.function.name === "summarize_anomalies");
-  const args = call ? safeParseToolArgs(call.function.arguments) : null;
+  const functionCalls = response.functionCalls() || [];
+  const call = functionCalls.find(fc => fc.name === "summarize_anomalies");
 
-  return args?.summary || null;
+  return call?.args?.summary || null;
 }
 
 // ==========================================================
@@ -618,33 +691,33 @@ async function executeRowsBatchViaAI({ chatId, processId, rows, contextLabel, pr
   const payload = rows.map(r => ({ row: r.row, nama: r.nama, data: r.data }));
 
   try {
-    const response = await callOpenAIWithRetry(
+    const result = await callOpenAIWithRetry(
       () =>
-        ai.chat.completions.create({
-          model: MODEL,
-          reasoning_effort: REASONING_EFFORT,
-          messages: [
+        batchCreateModel.generateContent({
+          contents: [
             {
               role: "user",
-              content:
-                `${promptIntro} Panggil tool create_promotion UNTUK MASING-MASING baris di bawah ini ` +
-                `(total ${rows.length} baris, jadi total ${rows.length} pemanggilan tool dalam respons ini) - ` +
-                "gunakan data APA ADANYA, jangan mengubah, membulatkan, atau menafsirkan ulang nilai apapun. " +
-                "Field \"nama\" pada tiap pemanggilan tool WAJIB persis sama dengan \"nama\" pada baris " +
-                "terkait, supaya bisa dicocokkan.\n\n" +
-                "Baris-baris yang harus dieksekusi:\n\n" + JSON.stringify(payload)
+              parts: [
+                {
+                  text:
+                    `${promptIntro} Panggil tool create_promotion UNTUK MASING-MASING baris di bawah ini ` +
+                    `(total ${rows.length} baris, jadi total ${rows.length} pemanggilan tool dalam respons ini) - ` +
+                    "gunakan data APA ADANYA, jangan mengubah, membulatkan, atau menafsirkan ulang nilai apapun. " +
+                    "Field \"nama\" pada tiap pemanggilan tool WAJIB persis sama dengan \"nama\" pada baris " +
+                    "terkait, supaya bisa dicocokkan.\n\n" +
+                    "Baris-baris yang harus dieksekusi:\n\n" + JSON.stringify(payload)
+                }
+              ]
             }
           ],
-          tools: [CREATE_PROMOTION_TOOL],
-          tool_choice: "required",
-          parallel_tool_calls: true,
-          max_completion_tokens: Math.min(16000, 1000 + rows.length * 200)
+          generationConfig: { maxOutputTokens: Math.min(8000, 1000 + rows.length * 200) }
         }),
       { contextLabel }
     );
 
-    const usage = response.usage || {};
-    console.log(`🔍 usage mentah dari OpenAI (${contextLabel}):`, JSON.stringify(usage));
+    const response = result.response;
+    const usage = response.usageMetadata || {};
+    console.log(`🔍 usage mentah dari Gemini (${contextLabel}):`, JSON.stringify(usage));
 
     recordUsage({
       chatId,
@@ -654,14 +727,19 @@ async function executeRowsBatchViaAI({ chatId, processId, rows, contextLabel, pr
       usage: buildUsagePayload(usage)
     });
 
-    const toolCalls = (response.choices?.[0]?.message?.tool_calls || [])
-      .filter(tc => tc.type === "function" && tc.function.name === "create_promotion");
+    // NOTE: Gemini bisa mengembalikan beberapa functionCall dalam satu
+    // respons ("parallel function calling") kalau modelnya menilai perlu,
+    // tapi TIDAK ADA jaminan keras (seperti parallel_tool_calls di OpenAI)
+    // bahwa jumlahnya akan selalu persis sama dengan jumlah baris yang
+    // diminta. Baris yang tidak kebagian tool call tetap fallback ke data
+    // asli, sama seperti versi OpenAI/DeepSeek.
+    const functionCalls = (response.functionCalls() || []).filter(fc => fc.name === "create_promotion");
 
     const usedIndexes = new Set();
     const rowsWithArgs = rows.map(row => {
-      const matchIdx = toolCalls.findIndex((tc, idx) => {
+      const matchIdx = functionCalls.findIndex((fc, idx) => {
         if (usedIndexes.has(idx)) return false;
-        const args = safeParseToolArgs(tc.function.arguments);
+        const args = fc.args;
         return args && String(args.nama || "").trim() === String(row.nama || "").trim();
       });
 
@@ -671,7 +749,7 @@ async function executeRowsBatchViaAI({ chatId, processId, rows, contextLabel, pr
       }
 
       usedIndexes.add(matchIdx);
-      const args = safeParseToolArgs(toolCalls[matchIdx].function.arguments);
+      const args = functionCalls[matchIdx].args;
       const argsToUse = argsStructurallyMatch(args, row.data) ? args : row.data;
       return { row, argsToUse, viaLLM: true };
     });
@@ -945,8 +1023,3 @@ module.exports = {
   buildImportFlagText,
   buildFlagKeyboard
 };
-
-
-
-
-

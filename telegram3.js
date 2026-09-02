@@ -43,7 +43,7 @@ const {
   buildFieldMenuText,
   buildRowListKeyboard,
 } = require("./tools/flagEdit");
-const { formatTokenSummary } = require("./tools/tokenMonitor");
+const { formatTokenSummary, formatLastProcessTokenSummary } = require("./tools/tokenMonitor");
 const { isUncertainReply, getHelpText } = require("./tools/uncertainty");
 const { askContextualHelp } = require("./tools/contextHelper");
 const { answerPromotionQuestion } = require("./tools/analysisAgent");
@@ -818,7 +818,8 @@ bot.on("message", async (msg) => {
           EXTERNAL_CALL_TIMEOUT_MS,
           "analisis AI"
         );
-        await sendLong(chatId, answer);
+        const tokenBlock = formatLastProcessTokenSummary(processId);
+        await sendLong(chatId, answer + "\n\n" + tokenBlock);
       } catch (err) {
         await send(chatId, `❌ ${friendlyError(err, "answerPromotionQuestion")}`);
       }

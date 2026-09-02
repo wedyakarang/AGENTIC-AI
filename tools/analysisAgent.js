@@ -1,59 +1,22 @@
 // ==========================================================
 // ANALYSIS AGENT - AI menangkap MAKSUD pertanyaan bebas soal promosi,
-// (VERSI OPENAI / GPT)
-// ==========================================================
-//
-// PERBEDAAN DARI VERSI GEMINI:
-//
-// 1. SDK "openai", bukan "@google/generative-ai". Client dibuat sekali
-//    secara global (ai = new OpenAI(...)) dan tools dikirim ulang tiap
-//    request lewat parameter `tools`, bukan lewat model instance
-//    terpisah seperti pola getGenerativeModel() di Gemini.
-//
-// 2. Skema parameter tool ditulis dalam JSON Schema biasa (type:
-//    "object"/"string"/"boolean"/"number"), BUKAN SchemaType enum
-//    Gemini (SchemaType.OBJECT dst).
-//
-// 3. Memaksa model manggil tool (pengganti toolConfig.mode:"ANY")
-//    pakai tool_choice: "required".
-//
-// 4. Argumen tool call dari OpenAI (tool_calls[].function.arguments)
-//    adalah STRING JSON, BUKAN object langsung seperti Gemini - jadi
-//    HARUS di-parse lewat JSON.parse (lihat safeParseToolArgs).
-//
-// 5. Padanan mematikan extended thinking (thinkingConfig.thinkingBudget
-//    di Gemini) adalah parameter reasoning_effort: "none" - WAJIB
-//    disertakan kalau model reasoning dipakai bersama `tools`, karena
-//    endpoint /v1/chat/completions menolak nilai lain untuk kombinasi
-//    itu.
-//
-// 6. Tidak ada maxOutputTokens - pakai max_completion_tokens.
-//
-// 7. Usage token dilaporkan lewat response.usage dengan nama field
-//    prompt_tokens / completion_tokens / completion_tokens_details.
-//    reasoning_tokens / prompt_tokens_details.cached_tokens /
-//    total_tokens - beda dari promptTokenCount dst di Gemini.
-//
-// 8. SEMUA logic bisnis lain (cache jawaban, jalur cepat keyword,
-//    filter/agregasi data promosi, format jawaban) PERSIS SAMA seperti
-//    versi Gemini - tidak ada perubahan perilaku, hanya provider LLM
-//    dan bentuk pemanggilannya yang beda.
-//
+// (VERSI GEMINI)
 // ==========================================================
 
-const OpenAI = require("openai");
+const { GoogleGenerativeAI, SchemaType } = require("@google/generative-ai");
 const { fetchAllPromotions } = require("./analysis");
 const { recordUsage } = require("./tokenMonitor");
 
-const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// CEK nama model OpenAI terbaru yang tersedia di akun kamu - placeholder.
-const MODEL = "gpt-4o-mini";
+// CEK nama model Gemini terbaru yang tersedia di akun/API key kamu -
+// sesuaikan kalau ada versi yang lebih baru (mis. gemini-3.6-flash).
+const MODEL = "gemini-3.5-flash";
 
-// Padanan thinkingConfig.thinkingBudget: 0 - mematikan extended
-// reasoning. WAJIB "none" kalau model reasoning dipakai bareng `tools`
-// (endpoint /v1/chat/completions menolak nilai lain untuk kombinasi itu).
-const REASONING_EFFORT = "none";
+// Padanan reasoning_effort: "none" di OpenAI - mematikan extended
+// thinking supaya lebih cepat & murah untuk tugas klasifikasi filter
+// sederhana seperti ini.
+const THINKING_BUDGET = 0;
 
 const REQUEST_TIMEOUT_MS = 20000;
 const RETRY_ATTEMPTS = 2;
@@ -99,14 +62,14 @@ function invalidateAnswerCache() {
 // v29(b) - JALUR CEPAT BERBASIS KEYWORD (TANPA AI)
 // ==========================================================
 // Hanya menangani pola pertanyaan yang SANGAT umum & jelas maknanya.
-// Kalau tidak yakin/cocok, return null supaya fallback ke OpenAI -
+// Kalau tidak yakin/cocok, return null supaya fallback ke Gemini -
 // lebih aman daripada salah tebak filter.
 function tryFastKeywordMatch(question) {
   const q = question.toLowerCase();
 
   // Kalau ada indikasi kompleksitas (nama spesifik, perbandingan angka,
   // agregat, tipe promo, dsb), JANGAN dipaksa lewat jalur cepat -
-  // serahkan ke OpenAI supaya tidak salah filter.
+  // serahkan ke Gemini supaya tidak salah filter.
   const hasComplexSignal =
     /nama|kode|promo_code|kupon|maksimal|minimal|paling|rata-rata|rata2|tertinggi|terendah|di atas|di bawah|lebih dari|kurang dari|max\s*use|kuota|limit|tipe|jenis promo|early\s*bird|affiliate|special\s*deal/.test(
       q
@@ -125,7 +88,7 @@ function tryFastKeywordMatch(question) {
 
   // Jalur cepat ini HANYA menangani pertanyaan status aktif/tidak
   // aktif yang jelas. Kalau tidak ada sinyal status sama sekali,
-  // serahkan ke OpenAI (termasuk pertanyaan umum "ada promo apa saja"
+  // serahkan ke Gemini (termasuk pertanyaan umum "ada promo apa saja"
   // tanpa filter status, supaya tidak salah tebak jenis jawaban).
   if (!isActiveFilter) return null;
 
@@ -182,88 +145,79 @@ async function callGeminiWithRetry(requestFn, contextLabel) {
       const canRetry = attempt < RETRY_ATTEMPTS && isRetryable5xx(err);
       if (!canRetry) throw err;
       const delayMs = RETRY_BASE_DELAY_MS * Math.pow(3, attempt);
-      console.warn(`⚠️ OpenAI 5xx/overloaded saat ${contextLabel} - retry ${attempt + 1}/${RETRY_ATTEMPTS} setelah ${delayMs}ms...`);
+      console.warn(`⚠️ Gemini 5xx/overloaded saat ${contextLabel} - retry ${attempt + 1}/${RETRY_ATTEMPTS} setelah ${delayMs}ms...`);
       await sleep(delayMs);
     }
   }
   throw lastErr;
 }
 
-function buildUsagePayload(usage) {
-  const u = usage || {};
+// Gemini melaporkan usage lewat response.usageMetadata, dengan nama
+// field yang beda dari OpenAI (promptTokenCount dst, bukan
+// prompt_tokens dst).
+function buildUsagePayload(usageMetadata) {
+  const u = usageMetadata || {};
   return {
-    prompt_tokens: u.prompt_tokens ?? 0,
-    completion_tokens: u.completion_tokens ?? 0,
-    thoughts_tokens: u.completion_tokens_details?.reasoning_tokens ?? 0,
-    tool_use_prompt_tokens: 0,
-    cached_tokens: u.prompt_tokens_details?.cached_tokens ?? 0,
-    total_tokens: u.total_tokens ?? 0
+    prompt_tokens: u.promptTokenCount ?? 0,
+    completion_tokens: u.candidatesTokenCount ?? 0,
+    thoughts_tokens: u.thoughtsTokenCount ?? 0,
+    tool_use_prompt_tokens: u.toolUsePromptTokenCount ?? 0,
+    cached_tokens: u.cachedContentTokenCount ?? 0,
+    total_tokens: u.totalTokenCount ?? 0
   };
-}
-
-// OpenAI mengembalikan argumen tool call sebagai STRING JSON (beda
-// dari Gemini yang sudah berupa object langsung) - HARUS di-parse.
-function safeParseToolArgs(rawArgs) {
-  if (rawArgs && typeof rawArgs === "object") return rawArgs;
-  try {
-    return JSON.parse(rawArgs);
-  } catch (err) {
-    console.warn("⚠️ Gagal parse argumen tool dari AI:", err.message);
-    return null;
-  }
 }
 
 // ==========================================================
 // TOOL: query_promotions - AI HANYA menentukan FILTER & JENIS
 // JAWABAN yang diminta user, TIDAK menghitung apapun sendiri.
-// Schema pakai JSON Schema biasa (gaya OpenAI function calling).
+// Schema pakai SchemaType enum dari SDK Gemini.
 // ==========================================================
 const QUERY_PROMOTIONS_FUNCTION = {
   name: "query_promotions",
   description:
     "Tentukan apakah pertanyaan user relevan dengan data promosi GuestPro, dan jika ya, tentukan filter yang sesuai serta jenis jawaban yang diminta (jumlah, daftar, atau nilai agregat seperti maksimal/minimal/rata-rata). JANGAN menghitung apapun sendiri - cukup tentukan filter & jenis jawabannya, penghitungan dilakukan sistem.",
   parameters: {
-    type: "object",
+    type: SchemaType.OBJECT,
     properties: {
       is_relevant: {
-        type: "boolean",
+        type: SchemaType.BOOLEAN,
         description:
           "true kalau pertanyaan user memang tentang data promosi GuestPro (status aktif/tidak aktif, jumlah pemakaian, batas maksimal pemakaian, nama promosi, kode promo, tipe promosi, ringkasan/statistik promosi, dsb). false kalau pertanyaan SAMA SEKALI TIDAK berkaitan dengan data promosi, contoh: 'sekarang tanggal berapa?', 'siapa presiden Indonesia?', obrolan umum, sapaan, atau topik lain di luar promosi. Kalau ragu-ragu tapi ada kemungkinan masih nyambung ke promosi, pilih true."
       },
       name_query: {
-        type: "string",
+        type: SchemaType.STRING,
         description:
           "Isi HANYA kalau user menyebut NAMA SPESIFIK promosi yang dicari (pencarian, bukan permintaan daftar umum), contoh: 'apakah ada promosi dengan nama wedya?' -> name_query='wedya'. 'cari promo diskon lebaran' -> name_query='diskon lebaran'. KOSONGKAN string ('') kalau user TIDAK menyebut nama spesifik dan hanya minta filter umum seperti status aktif/tidak aktif, jumlah pemakaian, atau daftar semua promosi. Abaikan/kosongkan kalau is_relevant=false."
       },
       is_active_filter: {
-        type: "string",
+        type: SchemaType.STRING,
         enum: ["active", "inactive", "any"],
         description: "'active' kalau user tanya soal promo yang masih aktif/berjalan, 'inactive' kalau tanya yang tidak aktif/nonaktif/mati, 'any' kalau status aktif tidak relevan dengan pertanyaan. Isi 'any' kalau is_relevant=false."
       },
       used_comparison: {
-        type: "string",
+        type: SchemaType.STRING,
         enum: ["gt", "gte", "lt", "lte", "eq", "none"],
         description: "Operator perbandingan untuk jumlah PEMAKAIAN AKTUAL promo (field 'used' - berapa kali promo ini SUDAH dipakai tamu), dipakai untuk FILTER data sebelum dihitung/ditampilkan/diagregasi. gt=lebih dari, gte=minimal/setidaknya, lt=kurang dari, lte=maksimal, eq=tepat sama dengan, none=tidak ada filter pemakaian aktual di pertanyaan. JANGAN dipakai untuk pertanyaan soal 'max use'/batas/kuota - itu pakai max_use_comparison. Isi 'none' kalau is_relevant=false."
       },
       used_value: {
-        type: "number",
+        type: SchemaType.NUMBER,
         description: "Nilai pembanding untuk used_comparison, contoh: 'yang sudah dipakai di atas 100 kali' -> used_comparison=gt, used_value=100. Abaikan/isi 0 kalau used_comparison=none atau is_relevant=false."
       },
       max_use_comparison: {
-        type: "string",
+        type: SchemaType.STRING,
         enum: ["gt", "gte", "lt", "lte", "eq", "none"],
         description: "Operator perbandingan untuk BATAS MAKSIMAL PEMAKAIAN/KUOTA promo (field 'max_use' - batas yang DI-SET, BUKAN jumlah yang sudah terpakai). Pakai ini kalau user menyebut 'max use', 'kuota', 'batas pemakaian', 'limit promo', 'maksimal pemakaian yang diperbolehkan'. gt=lebih dari, gte=minimal, lt=kurang dari, lte=maksimal, eq=tepat sama dengan, none=tidak ada filter max_use di pertanyaan. Isi 'none' kalau is_relevant=false."
       },
       max_use_value: {
-        type: "number",
+        type: SchemaType.NUMBER,
         description: "Nilai pembanding untuk max_use_comparison, contoh: 'max use-nya di bawah 10' -> max_use_comparison=lt, max_use_value=10. Abaikan/isi 0 kalau max_use_comparison=none atau is_relevant=false."
       },
       promotion_type: {
-        type: "string",
+        type: SchemaType.STRING,
         description: "Isi HANYA kalau user menyebut tipe promosi spesifik (PROMO_CODE, SPECIAL_DEAL, EARLY_BIRD, AFFILIATE, dll persis sesuai istilah GuestPro). Kosongkan string kalau tidak relevan atau is_relevant=false."
       },
       answer_type: {
-        type: "string",
+        type: SchemaType.STRING,
         enum: ["count", "list", "aggregate"],
         description:
           "'count' kalau user minta ANGKA JUMLAH promosi yang cocok (misal 'ada berapa promo aktif?'). " +
@@ -273,7 +227,7 @@ const QUERY_PROMOTIONS_FUNCTION = {
           "Isi 'count' kalau is_relevant=false (tidak akan dipakai)."
       },
       aggregate_field: {
-        type: "string",
+        type: SchemaType.STRING,
         enum: ["none", "used", "max_use"],
         description:
           "Field yang ingin diringkas dengan fungsi agregat, HANYA diisi kalau answer_type='aggregate'. " +
@@ -282,19 +236,19 @@ const QUERY_PROMOTIONS_FUNCTION = {
           "Isi 'none' kalau answer_type bukan 'aggregate'."
       },
       aggregate_function: {
-        type: "string",
+        type: SchemaType.STRING,
         enum: ["none", "max", "min", "avg", "sum"],
         description:
           "Fungsi agregat yang diminta, HANYA diisi kalau answer_type='aggregate'. max=nilai tertinggi, min=nilai terendah, avg=rata-rata, sum=jumlah total. Isi 'none' kalau answer_type bukan 'aggregate'."
       },
       sort_by: {
-        type: "string",
+        type: SchemaType.STRING,
         enum: ["none", "used", "max_use"],
         description:
           "Isi HANYA kalau answer_type='list' DAN user memang minta diurutkan/dicari yang PALING banyak/sedikit dari suatu angka (mis. 'promo apa yang paling banyak dipakai' -> sort_by='used'; 'promo dengan max use terbesar' -> sort_by='max_use'). Isi 'none' kalau tidak ada permintaan urutan seperti itu."
       },
       sort_direction: {
-        type: "string",
+        type: SchemaType.STRING,
         enum: ["none", "desc", "asc"],
         description:
           "Isi HANYA kalau sort_by diisi. 'desc' untuk paling banyak/tertinggi/terbesar, 'asc' untuk paling sedikit/terendah/terkecil. Isi 'none' kalau sort_by='none'."
@@ -304,7 +258,20 @@ const QUERY_PROMOTIONS_FUNCTION = {
   }
 };
 
-const QUERY_PROMOTIONS_TOOL = { type: "function", function: QUERY_PROMOTIONS_FUNCTION };
+// Model dibuat sekali secara global dengan tools & konfigurasi sudah
+// menempel di dalamnya - beda dari pola OpenAI yang mengirim `tools`
+// ulang tiap request lewat parameter terpisah.
+const model = genAI.getGenerativeModel({
+  model: MODEL,
+  tools: [{ functionDeclarations: [QUERY_PROMOTIONS_FUNCTION] }],
+  toolConfig: {
+    functionCallingConfig: { mode: "ANY" } // padanan tool_choice: "required" di OpenAI
+  },
+  generationConfig: {
+    maxOutputTokens: 500,
+    thinkingConfig: { thinkingBudget: THINKING_BUDGET }
+  }
+});
 
 // ==========================================================
 // PENGHITUNGAN/FILTER DATA - 100% JS, DETERMINISTIK, TIDAK PERNAH
@@ -542,7 +509,7 @@ function formatAggregateAnswer(filtered, args) {
   return `Nilai *${fnLabel}* untuk ${fieldLabel}${scopeText} adalah *${result}* (dari ${values.length} promosi).`;
 }
 
-// Dipakai baik oleh jalur cepat (keyword) maupun jalur OpenAI, supaya
+// Dipakai baik oleh jalur cepat (keyword) maupun jalur Gemini, supaya
 // logika "args -> jawaban akhir" tetap satu tempat saja (tidak
 // diduplikasi antara dua jalur).
 function buildFinalAnswerFromArgs(promotions, args) {
@@ -578,7 +545,7 @@ async function answerPromotionQuestion({ chatId, processId, question }) {
   // ----------------------------------------------------------
   // 1) CEK CACHE dulu - kalau pertanyaan PERSIS SAMA (setelah
   //    dinormalisasi) sudah pernah dijawab dalam rentang TTL,
-  //    langsung pakai jawaban lama TANPA panggil OpenAI/GuestPro.
+  //    langsung pakai jawaban lama TANPA panggil Gemini/GuestPro.
   // ----------------------------------------------------------
   const cacheKey = normalizeQuestionKey(effectiveQuestion);
   const cached = answerCache.get(cacheKey);
@@ -594,11 +561,11 @@ async function answerPromotionQuestion({ chatId, processId, question }) {
 
   let args;
   if (fastArgs) {
-    console.log("⚡ Pola /analisis dikenali via keyword, skip panggilan OpenAI:", JSON.stringify(fastArgs));
+    console.log("⚡ Pola /analisis dikenali via keyword, skip panggilan Gemini:", JSON.stringify(fastArgs));
     args = fastArgs;
   } else {
     // --------------------------------------------------------
-    // 3) FALLBACK: panggil OpenAI seperti biasa untuk pertanyaan
+    // 3) FALLBACK: panggil Gemini seperti biasa untuk pertanyaan
     //    yang lebih rumit/ambigu.
     // --------------------------------------------------------
     const prompt =
@@ -614,22 +581,15 @@ async function answerPromotionQuestion({ chatId, processId, question }) {
       `kalau user tanya "promo APA/MANA yang paling banyak/sedikit dipakai" (minta TAHU IDENTITAS promosinya) -> answer_type='list', sort_by='used' atau 'max_use' sesuai konteks, sort_direction='desc' (paling banyak/tertinggi) atau 'asc' (paling sedikit/terendah). ` +
       `Kalau user cuma tanya ANGKA-nya saja tanpa peduli promosi mana ("berapa pemakaian tertinggi", "berapa rata-rata pemakaian") -> answer_type='aggregate' beserta aggregate_field dan aggregate_function yang sesuai.`;
 
-    const response = await callGeminiWithRetry(
-      () =>
-        ai.chat.completions.create({
-          model: MODEL,
-          reasoning_effort: REASONING_EFFORT,
-          messages: [{ role: "user", content: prompt }],
-          tools: [QUERY_PROMOTIONS_TOOL],
-          tool_choice: "required",
-          max_completion_tokens: 500
-        }),
+    const result = await callGeminiWithRetry(
+      () => model.generateContent(prompt),
       "analisis-ai"
     );
+    const response = result.response;
 
-    const usage = response.usage || {};
+    const usage = response.usageMetadata || {};
 
-    console.log("🔍 usage mentah dari OpenAI (analisis-ai):", JSON.stringify(usage));
+    console.log("🔍 usage mentah dari Gemini (analisis-ai):", JSON.stringify(usage));
 
     recordUsage({
       chatId,
@@ -639,9 +599,11 @@ async function answerPromotionQuestion({ chatId, processId, question }) {
       usage: buildUsagePayload(usage)
     });
 
-    const toolCalls = response.choices?.[0]?.message?.tool_calls || [];
-    const call = toolCalls.find(tc => tc.type === "function" && tc.function.name === "query_promotions");
-    args = call ? safeParseToolArgs(call.function.arguments) : null;
+    // Gemini mengembalikan argumen tool call SUDAH BERUPA OBJECT
+    // langsung (bukan string JSON seperti OpenAI) - tidak perlu parse.
+    const functionCalls = typeof response.functionCalls === "function" ? response.functionCalls() : [];
+    const call = (functionCalls || []).find(fc => fc.name === "query_promotions");
+    args = call ? call.args : null;
 
     if (!args) {
       console.error("⚠️ AI tidak mengembalikan filter yang valid:", JSON.stringify(response).slice(0, 500));
@@ -664,7 +626,7 @@ async function answerPromotionQuestion({ chatId, processId, question }) {
 
   // Simpan ke cache SETELAH jawaban akhir jadi, supaya pertanyaan
   // persis sama berikutnya (dalam rentang TTL) tidak perlu panggil
-  // OpenAI ataupun fetch ulang ke GuestPro.
+  // Gemini ataupun fetch ulang ke GuestPro.
   answerCache.set(cacheKey, { answer, timestamp: Date.now() });
 
   return answer;
